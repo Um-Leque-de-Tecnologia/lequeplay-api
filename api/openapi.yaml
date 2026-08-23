@@ -1,0 +1,450 @@
+openapi: 3.0.3
+info:
+  title: LequePlay API
+  description: |
+    API da **LequePlay** — plataforma social para descobrir, acompanhar e avaliar
+    filmes, séries e podcasts.
+
+    Esta entrega cobre o **catálogo público** e a **busca semântica** (embeddings
+    Gemini + pgvector, feita no backend) e o **login via Keycloak** (proxy de
+    password grant + validação de JWT).
+
+    ## Autenticação
+    Endpoints protegidos exigem um **Bearer token** (JWT do realm `lequeplay`),
+    obtido em `POST /v1/auth/login`. No cabeçalho: `Authorization: Bearer <token>`.
+    Endpoints do catálogo e da busca são **públicos**.
+
+    ## Erros
+    Erros seguem o formato `application/problem+json` (RFC 7807).
+  version: 0.1.0
+  contact:
+    name: Um Leque de Tecnologia
+  license:
+    name: Proprietary
+
+servers:
+  - url: https://api.lequeplay.rodolfodebonis.com.br
+    description: Produção
+  - url: http://localhost:8080
+    description: Local
+
+tags:
+  - name: Catálogo
+    description: Mídias, gêneros e versão do catálogo (público)
+  - name: Busca
+    description: Busca semântica, léxica e híbrida (público)
+  - name: Autenticação
+    description: Login/refresh/logout via Keycloak e perfil do usuário
+
+paths:
+  /healthz:
+    get:
+      summary: Liveness
+      description: Sempre 200 enquanto o processo está vivo.
+      tags: [Catálogo]
+      security: []
+      responses:
+        '200':
+          description: Vivo
+          content:
+            text/plain:
+              schema: { type: string, example: ok }
+
+  /readyz:
+    get:
+      summary: Readiness
+      description: 200 apenas quando as dependências (Postgres) respondem.
+      tags: [Catálogo]
+      security: []
+      responses:
+        '200':
+          description: Pronto
+          content:
+            text/plain:
+              schema: { type: string, example: ready }
+        '503':
+          description: Indisponível (dependência fora)
+
+  /metrics:
+    get:
+      summary: Métricas Prometheus
+      tags: [Catálogo]
+      security: []
+      responses:
+        '200':
+          description: Métricas no formato Prometheus
+          content:
+            text/plain: {}
+
+  /v1/generos:
+    get:
+      summary: Lista de gêneros
+      tags: [Catálogo]
+      security: []
+      responses:
+        '200':
+          description: Gêneros em ordem alfabética
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/Genero' }
+
+  /v1/midias:
+    get:
+      summary: Lista o catálogo
+      description: Lista mídias com filtros, ordenadas por popularidade, paginadas.
+      tags: [Catálogo]
+      security: []
+      parameters:
+        - $ref: '#/components/parameters/Tipo'
+        - $ref: '#/components/parameters/Genero'
+        - $ref: '#/components/parameters/Ano'
+        - $ref: '#/components/parameters/Limite'
+        - $ref: '#/components/parameters/Offset'
+      responses:
+        '200':
+          description: Página de mídias
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/PaginaMidias' }
+
+  /v1/midias/{id}:
+    get:
+      summary: Detalhe de uma mídia
+      description: Retorna a mídia com créditos (elenco/equipe) e temporadas (séries).
+      tags: [Catálogo]
+      security: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        '200':
+          description: Detalhe da mídia
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/MidiaDetalhe' }
+        '404':
+          $ref: '#/components/responses/NaoEncontrado'
+
+  /v1/busca:
+    get:
+      summary: Busca no catálogo
+      description: |
+        Busca por relevância. Modos:
+        - `auto` (padrão) / `hybrid`: fusão RRF de busca semântica (vetorial) + léxica.
+        - `vector`: puramente semântica (embeddings Gemini + pgvector, cosseno).
+        - `fts`: puramente léxica (full-text português + trigram).
+
+        Quando o Gemini está indisponível, cai para `fts` e marca `usouFallback`.
+      tags: [Busca]
+      security: []
+      parameters:
+        - name: q
+          in: query
+          required: true
+          description: Consulta em linguagem natural.
+          schema: { type: string, example: crime e investigação policial }
+        - name: modo
+          in: query
+          required: false
+          schema:
+            type: string
+            enum: [auto, hybrid, vector, fts]
+            default: auto
+        - $ref: '#/components/parameters/Tipo'
+        - $ref: '#/components/parameters/Genero'
+        - $ref: '#/components/parameters/Ano'
+        - $ref: '#/components/parameters/Limite'
+      responses:
+        '200':
+          description: Resultado da busca
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ResultadoBusca' }
+        '400':
+          $ref: '#/components/responses/Validacao'
+
+  /v1/catalogo/versao:
+    get:
+      summary: Versão do catálogo
+      description: Incrementada a cada ingestão; use para invalidar cache no cliente.
+      tags: [Catálogo]
+      security: []
+      responses:
+        '200':
+          description: Versão atual
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  versao: { type: integer, format: int64, example: 2 }
+
+  /v1/auth/login:
+    post:
+      summary: Login (proxy Keycloak)
+      description: Troca usuário/senha por tokens via Keycloak (password grant).
+      tags: [Autenticação]
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/LoginRequest' }
+      responses:
+        '200':
+          description: Tokens emitidos
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Token' }
+        '400':
+          $ref: '#/components/responses/Validacao'
+        '401':
+          $ref: '#/components/responses/NaoAutenticado'
+        '429':
+          $ref: '#/components/responses/MuitasTentativas'
+
+  /v1/auth/refresh:
+    post:
+      summary: Renova tokens
+      tags: [Autenticação]
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/RefreshRequest' }
+      responses:
+        '200':
+          description: Novos tokens
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Token' }
+        '400':
+          $ref: '#/components/responses/Validacao'
+        '401':
+          $ref: '#/components/responses/NaoAutenticado'
+
+  /v1/auth/logout:
+    post:
+      summary: Logout (revoga a sessão)
+      tags: [Autenticação]
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/RefreshRequest' }
+      responses:
+        '204':
+          description: Sessão revogada
+        '400':
+          $ref: '#/components/responses/Validacao'
+
+  /v1/auth/me:
+    get:
+      summary: Perfil do usuário autenticado
+      description: Retorna as claims do token. **Requer Bearer token.**
+      tags: [Autenticação]
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: Claims do usuário
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Claims' }
+        '401':
+          $ref: '#/components/responses/NaoAutenticado'
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: JWT do realm Keycloak `lequeplay` (obtido em /v1/auth/login).
+
+  parameters:
+    Tipo:
+      name: tipo
+      in: query
+      required: false
+      schema: { type: string, enum: [filme, serie, podcast] }
+    Genero:
+      name: genero
+      in: query
+      required: false
+      schema: { type: string, example: Drama }
+    Ano:
+      name: ano
+      in: query
+      required: false
+      schema: { type: integer, example: 2022 }
+    Limite:
+      name: limite
+      in: query
+      required: false
+      schema: { type: integer, default: 20, minimum: 1, maximum: 100 }
+    Offset:
+      name: offset
+      in: query
+      required: false
+      schema: { type: integer, default: 0, minimum: 0 }
+
+  responses:
+    Validacao:
+      description: Requisição inválida
+      content:
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/Problem' }
+    NaoAutenticado:
+      description: Não autenticado / credenciais inválidas
+      content:
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/Problem' }
+    NaoEncontrado:
+      description: Recurso não encontrado
+      content:
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/Problem' }
+    MuitasTentativas:
+      description: Muitas tentativas (rate limit)
+      content:
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/Problem' }
+
+  schemas:
+    Midia:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        tipo: { type: string, enum: [filme, serie, podcast] }
+        titulo: { type: string }
+        tituloOriginal: { type: string }
+        sinopse: { type: string }
+        ano: { type: integer }
+        generos:
+          type: array
+          items: { type: string }
+        posterUrl: { type: string, format: uri }
+        duracaoMin: { type: integer }
+        popularidade: { type: number, format: float }
+        notaMedia: { type: number, format: float }
+      required: [id, tipo, titulo, generos, popularidade, notaMedia]
+
+    MidiaDetalhe:
+      allOf:
+        - $ref: '#/components/schemas/Midia'
+        - type: object
+          properties:
+            creditos:
+              type: array
+              items: { $ref: '#/components/schemas/Credito' }
+            temporadas:
+              type: array
+              items: { $ref: '#/components/schemas/Temporada' }
+
+    Credito:
+      type: object
+      properties:
+        pessoa: { type: string }
+        fotoUrl: { type: string, format: uri }
+        papel: { type: string, enum: [direcao, elenco, apresentacao] }
+        personagem: { type: string }
+      required: [pessoa, papel]
+
+    Temporada:
+      type: object
+      properties:
+        numero: { type: integer }
+        nome: { type: string }
+        ano: { type: integer }
+        totalEpisodios: { type: integer }
+      required: [numero, totalEpisodios]
+
+    Genero:
+      type: object
+      properties:
+        id: { type: integer }
+        nome: { type: string }
+      required: [id, nome]
+
+    SearchItem:
+      allOf:
+        - $ref: '#/components/schemas/Midia'
+        - type: object
+          properties:
+            score: { type: number, format: double, description: Relevância (maior = melhor). }
+            rank: { type: integer, description: Posição 1-based no ranking. }
+
+    ResultadoBusca:
+      type: object
+      properties:
+        query: { type: string }
+        modo: { type: string, enum: [auto, hybrid, vector, fts] }
+        usouFallback: { type: boolean, description: True quando caiu para busca léxica (Gemini indisponível). }
+        itens:
+          type: array
+          items: { $ref: '#/components/schemas/SearchItem' }
+      required: [query, modo, usouFallback, itens]
+
+    PaginaMidias:
+      type: object
+      properties:
+        itens:
+          type: array
+          items: { $ref: '#/components/schemas/Midia' }
+        total: { type: integer }
+        limite: { type: integer }
+        offset: { type: integer }
+      required: [itens, total, limite, offset]
+
+    LoginRequest:
+      type: object
+      properties:
+        usuario: { type: string, example: joao }
+        senha: { type: string, format: password }
+      required: [usuario, senha]
+
+    RefreshRequest:
+      type: object
+      properties:
+        refreshToken: { type: string }
+      required: [refreshToken]
+
+    Token:
+      type: object
+      properties:
+        accessToken: { type: string }
+        expiresIn: { type: integer, description: Segundos até o access token expirar. }
+        refreshToken: { type: string }
+        refreshExpiresIn: { type: integer }
+        tokenType: { type: string, example: Bearer }
+        scope: { type: string }
+      required: [accessToken, refreshToken, tokenType]
+
+    Claims:
+      type: object
+      properties:
+        sub: { type: string }
+        email: { type: string, format: email }
+        username: { type: string }
+        roles:
+          type: array
+          items: { type: string }
+      required: [sub]
+
+    Problem:
+      type: object
+      description: Erro no formato RFC 7807.
+      properties:
+        type: { type: string, example: about:blank }
+        title: { type: string }
+        status: { type: integer }
+        detail: { type: string }
+        instance: { type: string }
+      required: [title, status]

@@ -13,6 +13,7 @@ import (
 	migrations "github.com/Um-Leque-de-Tecnologia/lequeplay-api/db/migrations"
 	"github.com/Um-Leque-de-Tecnologia/lequeplay-api/internal/auth"
 	"github.com/Um-Leque-de-Tecnologia/lequeplay-api/internal/catalog"
+	"github.com/Um-Leque-de-Tecnologia/lequeplay-api/internal/docs"
 	"github.com/Um-Leque-de-Tecnologia/lequeplay-api/internal/integrations/gemini"
 	"github.com/Um-Leque-de-Tecnologia/lequeplay-api/internal/platform/config"
 	"github.com/Um-Leque-de-Tecnologia/lequeplay-api/internal/platform/health"
@@ -95,6 +96,10 @@ func run() error {
 	router.Handle("/metrics", mtr.Handler())
 	catalogHandler.Mount(router)
 	authHandler.Mount(router)
+	if cfg.Docs.Enabled {
+		docs.NewHandler(cfg.Docs).Mount(router)
+		logger.Info("documentação habilitada", slog.String("rota", "/docs"))
+	}
 
 	srv := httpserver.New(httpserver.Options{
 		Name:            "api",

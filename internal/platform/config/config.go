@@ -21,7 +21,17 @@ type Config struct {
 	Gemini    Gemini
 	TMDB      TMDB
 	Search    Search
+	Docs      Docs
 	Telemetry Telemetry
+}
+
+// Docs configura a exposição da documentação OpenAPI/Swagger.
+type Docs struct {
+	// Enabled liga as rotas /docs e /openapi.yaml.
+	Enabled bool `env:"DOCS_ENABLED" envDefault:"true"`
+	// PublicHost, quando definido, restringe a documentação a esse host (vazio =
+	// qualquer host).
+	PublicHost string `env:"DOCS_PUBLIC_HOST" envDefault:""`
 }
 
 // HTTP configura o servidor da API.

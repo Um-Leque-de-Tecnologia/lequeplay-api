@@ -1,0 +1,50 @@
+name: cnpg-image
+
+# Build da imagem CNPG (Postgres 17) + pgvector (trusted). Executado sob demanda
+# (workflow_dispatch), pois é uma imagem de infra que muda raramente — não faz
+# parte do build da app. Usa os MESMOS secrets de Actions (AWS_*) do cd.yaml, então
+# nenhuma credencial de ECR sai da esteira.
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag da imagem CNPG (ex.: 17-pgvector)"
+        required: true
+        default: "17-pgvector"
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Ensure ECR repository exists
+        run: |
+          repo=rodolfobonis/lequeplay-cnpg
+          aws ecr describe-repositories --repository-names "$repo" >/dev/null 2>&1 \
+            || aws ecr create-repository --repository-name "$repo" >/dev/null
+
+      - name: Build and push CNPG + pgvector image
+        uses: docker/build-push-action@v6
+        with:
+          context: ./deploy/cnpg-pgvector
+          file: ./deploy/cnpg-pgvector/Dockerfile
+          push: true
+          tags: ${{ steps.login-ecr.outputs.registry }}/rodolfobonis/lequeplay-cnpg:${{ inputs.tag }}

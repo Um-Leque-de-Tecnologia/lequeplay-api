@@ -1,0 +1,124 @@
+name: cd
+
+on:
+  workflow_run:
+    workflows: ['CI']
+    types:
+      - completed
+    branches:
+      - main
+
+# Operações no próprio repo (bump de versão, release) usam o GITHUB_TOKEN nativo;
+# o cross-repo (k3s-apps) usa o PAT secrets.GH_TOKEN.
+permissions:
+  contents: write
+  pull-requests: read
+
+jobs:
+  build_and_deploy:
+    if: ${{ github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.head_branch == 'main' && !contains(github.event.workflow_run.head_commit.message, '[skip ci]') }}
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ env.VERSION }}
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+        with:
+          token: ${{ github.token }}
+          fetch-depth: 0
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Increment version
+        run: |
+          chmod +x ./.config/scripts/increment_version.sh
+          ./.config/scripts/increment_version.sh
+          echo "VERSION=$(cat version.txt)" >> $GITHUB_ENV
+
+      - name: Add, commit and push version increment
+        run: |
+          git config --global user.name "GitHub Actions"
+          git config --global user.email "actions@github.com"
+          git add version.txt
+          if git diff --cached --quiet; then
+            echo "No version changes to commit"
+            exit 0
+          fi
+          git commit -m "chore(release): increment version [skip ci]"
+          git pull --rebase origin main
+          git push origin HEAD:main
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      # A imagem fica no namespace rodolfobonis/ do ECR (mesma conta/registry das
+      # demais apps), independente da org do GitHub onde o código vive.
+      - name: Ensure ECR repository exists
+        run: |
+          repo=rodolfobonis/lequeplay-api
+          aws ecr describe-repositories --repository-names "$repo" >/dev/null 2>&1 \
+            || aws ecr create-repository --repository-name "$repo" >/dev/null
+
+      - name: Preset Image Name
+        run: |
+          registry="${{ steps.login-ecr.outputs.registry }}"
+          echo "IMAGE=$(echo $registry/rodolfobonis/lequeplay-api:${{ env.VERSION }} | tr '[:upper:]' '[:lower:]')" >> $GITHUB_ENV
+
+      - name: Build and push image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          push: true
+          no-cache: true
+          tags: ${{ env.IMAGE }}
+          build-args: |
+            BIN=api
+
+      - name: Checkout k3s manifest repository
+        uses: actions/checkout@v4
+        with:
+          repository: RodolfoBonis/k3s-apps
+          ref: main
+          path: k3s-manifest
+          token: ${{ secrets.GH_TOKEN }}
+
+      - name: Update k3s manifests with new image version
+        run: |
+          cd k3s-manifest
+          yq e -i ".\"web-server\".image.tag = \"${{ env.VERSION }}\"" ./apps/lequeplay-api/values-prod.yaml
+          git config --global user.name "GitHub Actions"
+          git config --global user.email "actions@github.com"
+          git add ./apps/lequeplay-api/values-prod.yaml
+          git commit -m "lequeplay-api: bump image to ${{ env.VERSION }}"
+          git pull --rebase origin main
+          git push
+
+      # O ArgoCD sincroniza sozinho (automated selfHeal+prune) ao detectar o commit
+      # acima no k3s-apps; não forçamos sync via CLI (dispensa ARGOCD_TOKEN/SERVER).
+
+      - name: Create Tag for Release
+        id: create_tag
+        if: ${{ job.status == 'success' }}
+        run: echo "tag=v${{ env.VERSION }}" >> $GITHUB_OUTPUT
+
+      - name: Create Release
+        if: ${{ job.status == 'success' }}
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.create_tag.outputs.tag }}
+          name: Release ${{ env.VERSION }}
+          generate_release_notes: true
+          draft: false
+          prerelease: false
+          token: ${{ github.token }}

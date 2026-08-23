@@ -1,0 +1,21 @@
+# Dependências de desenvolvimento. O Postgres usa a imagem pgvector/pgvector
+# (Postgres 17 + extensão vector); a extensão pg_trgm já vem no core.
+services:
+  postgres:
+    image: pgvector/pgvector:pg17
+    environment:
+      POSTGRES_USER: lequeplay
+      POSTGRES_PASSWORD: lequeplay
+      POSTGRES_DB: lequeplay
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U lequeplay"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+volumes:
+  pgdata:

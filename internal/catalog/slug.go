@@ -31,11 +31,11 @@ const slugSemTitulo = "sem-titulo"
 
 // Slugify converte um título em slug de URL, aplicando as regras nesta ordem:
 //
-//	1. minúsculas;
-//	2. acentos viram a letra base (ver semAcento);
-//	3. tudo que não for [a-z0-9] vira "-";
-//	4. hifens repetidos viram um só, e hífen no início e no fim é removido;
-//	5. se sobrar string vazia, o resultado é "sem-titulo".
+//	(1) minúsculas;
+//	(2) acentos viram a letra base (ver semAcento);
+//	(3) tudo que não for [a-z0-9] vira "-";
+//	(4) hifens repetidos viram um só, e hífen no início e no fim é removido;
+//	(5) se sobrar string vazia, o resultado é "sem-titulo".
 //
 // As regras 3 e 4 saem de graça de uma passada só: um caractere inválido apenas
 // marca um hífen como pendente, e o hífen só é escrito quando vem um caractere

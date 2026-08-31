@@ -21,13 +21,15 @@ type Repo struct {
 // NewRepo constrói o repositório.
 func NewRepo(pool *pgxpool.Pool) *Repo { return &Repo{pool: pool} }
 
-// midiaColumns é a projeção comum usada para materializar uma Midia.
-const midiaColumns = `id, tipo, titulo, coalesce(titulo_original,''), coalesce(sinopse,''),
+// midiaColumns é a projeção comum usada para materializar uma Midia. A ordem
+// das colunas é contrato com scanMidia e scanSearchItems (e com midiaColumnsM):
+// mexer aqui sem mexer lá troca colunas de lugar no Scan, e o erro é mudo.
+const midiaColumns = `id, slug, tipo, titulo, coalesce(titulo_original,''), coalesce(sinopse,''),
 	coalesce(ano,0), generos, coalesce(poster_path,''), coalesce(duracao_min,0),
 	popularidade, nota_media`
 
 // midiaColumnsM é a mesma projeção qualificada pelo alias "m" (usada no JOIN da RRF).
-const midiaColumnsM = `m.id, m.tipo, m.titulo, coalesce(m.titulo_original,''), coalesce(m.sinopse,''),
+const midiaColumnsM = `m.id, m.slug, m.tipo, m.titulo, coalesce(m.titulo_original,''), coalesce(m.sinopse,''),
 	coalesce(m.ano,0), m.generos, coalesce(m.poster_path,''), coalesce(m.duracao_min,0),
 	m.popularidade, m.nota_media`
 
@@ -37,7 +39,7 @@ func scanMidia(row pgx.Row) (Midia, error) {
 		m      Midia
 		poster string
 	)
-	if err := row.Scan(&m.ID, &m.Tipo, &m.Titulo, &m.TituloOriginal, &m.Sinopse,
+	if err := row.Scan(&m.ID, &m.Slug, &m.Tipo, &m.Titulo, &m.TituloOriginal, &m.Sinopse,
 		&m.Ano, &m.Generos, &poster, &m.DuracaoMin, &m.Popularidade, &m.NotaMedia); err != nil {
 		return Midia{}, err
 	}
@@ -106,32 +108,41 @@ func (r *Repo) ListMidias(ctx context.Context, f Filter) (Page[Midia], error) {
 	return Page[Midia]{Itens: itens, Total: total, Limite: f.Limite, Offset: f.Offset}, nil
 }
 
-// GetMidia retorna uma mídia com créditos e temporadas. Retorna NotFound quando
-// não existe (ou quando o id não é um UUID válido — indistinguível de inexistente).
-func (r *Repo) GetMidia(ctx context.Context, id string) (MidiaDetalhe, error) {
-	if !isUUID(id) {
-		return MidiaDetalhe{}, apperr.New(apperr.KindNotFound, "Mídia não encontrada", "id inexistente")
+// GetMidia retorna uma mídia com créditos e temporadas. O parâmetro aceita tanto
+// o id (UUID) quanto o slug: o que tem cara de UUID é buscado por id, o resto por
+// slug. Retorna NotFound quando não existe.
+func (r *Repo) GetMidia(ctx context.Context, idOuSlug string) (MidiaDetalhe, error) {
+	// Duas consultas constantes, uma executada: nada do parâmetro entra no SQL,
+	// ele continua indo como $1.
+	const (
+		sqlPorID   = "SELECT " + midiaColumns + " FROM midias WHERE id = $1"
+		sqlPorSlug = "SELECT " + midiaColumns + " FROM midias WHERE slug = $1"
+	)
+	sql := sqlPorSlug
+	if isUUID(idOuSlug) {
+		sql = sqlPorID
 	}
 
-	sql := "SELECT " + midiaColumns + " FROM midias WHERE id = $1"
-	m, err := scanMidia(r.pool.QueryRow(ctx, sql, id))
+	m, err := scanMidia(r.pool.QueryRow(ctx, sql, idOuSlug))
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
-			return MidiaDetalhe{}, apperr.New(apperr.KindNotFound, "Mídia não encontrada", "id inexistente")
+			return MidiaDetalhe{}, apperr.New(apperr.KindNotFound, "Mídia não encontrada", "id ou slug inexistente")
 		}
 		return MidiaDetalhe{}, fmt.Errorf("buscar midia: %w", err)
 	}
 
 	detalhe := MidiaDetalhe{Midia: m}
 
-	creditos, err := r.creditos(ctx, id)
+	// Créditos e temporadas usam sempre o id da linha encontrada, nunca o
+	// parâmetro recebido — que pode ser um slug.
+	creditos, err := r.creditos(ctx, m.ID)
 	if err != nil {
 		return MidiaDetalhe{}, err
 	}
 	detalhe.Creditos = creditos
 
 	if m.Tipo == "serie" {
-		temporadas, err := r.temporadas(ctx, id)
+		temporadas, err := r.temporadas(ctx, m.ID)
 		if err != nil {
 			return MidiaDetalhe{}, err
 		}
@@ -221,7 +232,7 @@ func scanSearchItems(rows pgx.Rows) ([]SearchItem, error) {
 			it     SearchItem
 			poster string
 		)
-		if err := rows.Scan(&it.ID, &it.Tipo, &it.Titulo, &it.TituloOriginal, &it.Sinopse,
+		if err := rows.Scan(&it.ID, &it.Slug, &it.Tipo, &it.Titulo, &it.TituloOriginal, &it.Sinopse,
 			&it.Ano, &it.Generos, &poster, &it.DuracaoMin, &it.Popularidade, &it.NotaMedia,
 			&it.Score); err != nil {
 			return nil, fmt.Errorf("scan search item: %w", err)

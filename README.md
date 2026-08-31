@@ -41,7 +41,7 @@ make run                           # sobe a API em :8080
 | GET | `/metrics` | métricas Prometheus |
 | GET | `/v1/generos` | lista de gêneros |
 | GET | `/v1/midias` | catálogo (filtros: `tipo`, `genero`, `ano`, `limite`, `offset`) |
-| GET | `/v1/midias/{id}` | detalhe (créditos + temporadas) |
+| GET | `/v1/midias/{id}` | detalhe (créditos + temporadas). `{id}` aceita o **id** (UUID) **ou o slug** — ex.: `/v1/midias/homem-aranha-um-novo-dia` |
 | GET | `/v1/busca` | busca (`q`, `modo=auto\|hybrid\|vector\|fts`, filtros) |
 | GET | `/v1/catalogo/versao` | versão do catálogo (cache) |
 | POST | `/v1/auth/login` | `{usuario, senha}` → tokens (proxy Keycloak) |

@@ -8,6 +8,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -22,6 +23,7 @@ import (
 	pgvector "github.com/pgvector/pgvector-go"
 
 	migrations "github.com/Um-Leque-de-Tecnologia/lequeplay-api/db/migrations"
+	"github.com/Um-Leque-de-Tecnologia/lequeplay-api/internal/catalog"
 	"github.com/Um-Leque-de-Tecnologia/lequeplay-api/internal/integrations/gemini"
 	"github.com/Um-Leque-de-Tecnologia/lequeplay-api/internal/integrations/tmdb"
 	"github.com/Um-Leque-de-Tecnologia/lequeplay-api/internal/platform/config"
@@ -172,10 +174,15 @@ func docText(t tmdb.Title) string {
 // load insere todos os títulos (e seus créditos/temporadas) numa transação e
 // incrementa a versão do catálogo.
 func load(ctx context.Context, pool *pgxpool.Pool, titles []tmdb.Title, vectors [][]float32) (int, error) {
+	// Os candidatos a slug saem de uma passada sobre o lote INTEIRO, antes da
+	// transação: a regra de desempate do espelho em SQL não é decidível título a
+	// título (ver candidatosDoLote).
+	cands := candidatosDoLote(titles)
+
 	var count int
 	err := postgres.InTx(ctx, pool, func(tx pgx.Tx) error {
 		for i, t := range titles {
-			if err := upsertTitle(ctx, tx, t, vectors[i]); err != nil {
+			if err := upsertTitle(ctx, tx, t, vectors[i], cands[i]); err != nil {
 				return fmt.Errorf("upsert %q: %w", t.Titulo, err)
 			}
 			count++
@@ -186,7 +193,107 @@ func load(ctx context.Context, pool *pgxpool.Pool, titles []tmdb.Title, vectors 
 	return count, err
 }
 
-func upsertTitle(ctx context.Context, tx pgx.Tx, t tmdb.Title, vec []float32) error {
+// candidatosDoLote resolve, para cada título do lote, a lista de candidatos que
+// ele pode assumir — a mesma regra do espelho em SQL (db/migrations/00002).
+//
+// POR QUE isto existe em vez de chamar catalog.SlugCandidates direto no título:
+// o SQL fixa um contrato que NÃO é decidível linha a linha — quando uma base
+// repete, NENHUMA das linhas em conflito fica com a base pura, todas descem
+// juntas para o próximo candidato. Decidindo título a título, a base pura ficaria
+// com quem o seed processasse primeiro, que é exatamente a dependência de ordem
+// de inserção que a regra existe para evitar; e, pior, o primeiro re-seed depois
+// da migration reescreveria os slugs que o backfill acabou de gravar (o backfill
+// não dá a base pura a ninguém, o seed daria — e o link publicado quebra).
+//
+// A passada é por nível (base, base-ano, base-ano-tmdbid). Num nível, o candidato
+// só sobrevive para um título se nenhum outro título ainda pendente produzir a
+// mesma string naquele nível e se a string não tiver sido entregue a outro título
+// num nível anterior. É o par exato de repete_base/repete_ano/repete_tmdb mais os
+// NOT EXISTS do SQL. Quem sobrevive fica com esse candidato e com os mais
+// específicos depois dele, que seguem servindo de reserva contra uma linha que
+// já esteja no banco e não veio neste lote.
+//
+// O resultado não depende da ordem de titles: só do conjunto de candidatos.
+// Título que esgota os candidatos sai com a lista vazia e escolherSlug devolve
+// erro — do lado Go preferimos falhar a gravar um slug que não é o do título (o
+// SQL, que não pode abortar a migration, tem um nível extra com o id da linha).
+func candidatosDoLote(titles []tmdb.Title) [][]string {
+	todos := make([][]string, len(titles))
+	for i, t := range titles {
+		todos[i] = catalog.SlugCandidates(t.Titulo, t.Ano, t.TMDBID)
+	}
+
+	out := make([][]string, len(titles))
+	entregues := make(map[string]bool, len(titles))
+
+	pendentes := make([]int, 0, len(titles))
+	for i := range titles {
+		pendentes = append(pendentes, i)
+	}
+
+	for nivel := 0; len(pendentes) > 0; nivel++ {
+		conta := make(map[string]int, len(pendentes))
+		restam := false
+		for _, i := range pendentes {
+			if nivel < len(todos[i]) {
+				conta[todos[i][nivel]]++
+				restam = true
+			}
+		}
+		if !restam {
+			break // ninguém tem mais candidato: o que sobrou fica sem slug
+		}
+
+		proximos := make([]int, 0, len(pendentes))
+		for _, i := range pendentes {
+			if nivel >= len(todos[i]) {
+				continue
+			}
+			cand := todos[i][nivel]
+			if conta[cand] == 1 && !entregues[cand] {
+				out[i] = todos[i][nivel:]
+				entregues[cand] = true
+				continue
+			}
+			proximos = append(proximos, i)
+		}
+		pendentes = proximos
+	}
+	return out
+}
+
+// escolherSlug devolve o primeiro candidato ainda livre no banco. `cands` vem de
+// candidatosDoLote, já filtrado pela regra de desempate do lote; aqui só resta
+// conferir o que já está gravado.
+//
+// O desempate é por ano/tmdb_id e não por contador (base-2, base-3) porque o
+// contador depende da ordem de inserção: a cada re-seed o link de ontem passaria
+// a apontar para outro título. Ano e tmdb_id são estáveis, então o slug sai igual
+// toda vez que o seed roda.
+//
+// A checagem exclui a própria linha (mesmo tipo + tmdb_id): é isso que mantém o
+// re-seed idempotente — o título conserva o slug que já tinha em vez de ganhar
+// sufixo por colidir consigo mesmo.
+func escolherSlug(ctx context.Context, tx pgx.Tx, t tmdb.Title, cands []string) (string, error) {
+	for _, cand := range cands {
+		var existe int
+		// tmdb_id vai como int puro (não nullInt): com NULL em $3 a comparação
+		// daria NULL, o NOT (...) nunca seria verdadeiro e toda colisão passaria
+		// batida.
+		err := tx.QueryRow(ctx,
+			"SELECT 1 FROM midias WHERE slug = $1 AND NOT (tipo = $2 AND tmdb_id = $3)",
+			cand, string(t.Tipo), t.TMDBID).Scan(&existe)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return cand, nil // ninguém mais usa este slug
+		}
+		if err != nil {
+			return "", fmt.Errorf("checar slug %q: %w", cand, err)
+		}
+	}
+	return "", fmt.Errorf("nenhum slug livre para %q", t.Titulo)
+}
+
+func upsertTitle(ctx context.Context, tx pgx.Tx, t tmdb.Title, vec []float32, cands []string) error {
 	// Gêneros (tabela de navegação).
 	for _, g := range t.Generos {
 		if _, err := tx.Exec(ctx, "INSERT INTO generos (nome) VALUES ($1) ON CONFLICT (nome) DO NOTHING", g); err != nil {
@@ -199,12 +306,18 @@ func upsertTitle(ctx context.Context, tx pgx.Tx, t tmdb.Title, vec []float32) er
 		embedding = pgvector.NewVector(vec)
 	}
 
+	slug, err := escolherSlug(ctx, tx, t, cands)
+	if err != nil {
+		return err
+	}
+
 	var midiaID string
-	err := tx.QueryRow(ctx, `
-INSERT INTO midias (tipo, tmdb_id, titulo, titulo_original, sinopse, ano, generos,
+	err = tx.QueryRow(ctx, `
+INSERT INTO midias (tipo, tmdb_id, slug, titulo, titulo_original, sinopse, ano, generos,
 	poster_path, duracao_min, popularidade, nota_media, embedding, updated_at)
-VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12, now())
+VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13, now())
 ON CONFLICT (tipo, tmdb_id) DO UPDATE SET
+	slug = EXCLUDED.slug,
 	titulo = EXCLUDED.titulo,
 	titulo_original = EXCLUDED.titulo_original,
 	sinopse = EXCLUDED.sinopse,
@@ -217,7 +330,7 @@ ON CONFLICT (tipo, tmdb_id) DO UPDATE SET
 	embedding = COALESCE(EXCLUDED.embedding, midias.embedding),
 	updated_at = now()
 RETURNING id`,
-		string(t.Tipo), nullInt(t.TMDBID), t.Titulo, nullStr(t.TituloOrig), nullStr(t.Sinopse),
+		string(t.Tipo), nullInt(t.TMDBID), slug, t.Titulo, nullStr(t.TituloOrig), nullStr(t.Sinopse),
 		nullInt(t.Ano), t.Generos, nullStr(t.PosterPath), nullInt(t.DuracaoMin),
 		t.Popularidade, t.NotaMedia, embedding).Scan(&midiaID)
 	if err != nil {

@@ -33,6 +33,8 @@ func NewHandler(repo *Repo, search *SearchEngine, m *metrics.Metrics) *Handler {
 func (h *Handler) Mount(r chi.Router) {
 	r.Get("/v1/generos", h.listGeneros)
 	r.Get("/v1/midias", h.listMidias)
+	// O caminho continua {id} para não quebrar cliente nenhum, mas o parâmetro
+	// aceita o id (UUID) ou o slug da mídia.
 	r.Get("/v1/midias/{id}", h.getMidia)
 	r.Get("/v1/busca", h.busca)
 	r.Get("/v1/catalogo/versao", h.catalogVersion)
@@ -57,9 +59,10 @@ func (h *Handler) listMidias(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, page)
 }
 
+// getMidia atende GET /v1/midias/{id}, onde {id} é o id (UUID) ou o slug.
 func (h *Handler) getMidia(w http.ResponseWriter, r *http.Request) {
-	id := chi.URLParam(r, "id")
-	midia, err := h.repo.GetMidia(r.Context(), id)
+	idOuSlug := chi.URLParam(r, "id")
+	midia, err := h.repo.GetMidia(r.Context(), idOuSlug)
 	if err != nil {
 		apperr.Write(w, r, err)
 		return

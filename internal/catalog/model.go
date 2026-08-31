@@ -17,7 +17,11 @@ func posterURL(path string) string {
 
 // Midia é um item do catálogo (filme, série ou podcast).
 type Midia struct {
-	ID             string   `json:"id"`
+	ID string `json:"id"`
+	// Slug é o identificador legível e estável do título, aceito no lugar do id
+	// na rota de detalhe. Sem `omitempty` de propósito: slug vazio é defeito, e
+	// sumir do JSON apenas esconderia o defeito de quem consome.
+	Slug           string   `json:"slug"`
 	Tipo           string   `json:"tipo"`
 	Titulo         string   `json:"titulo"`
 	TituloOriginal string   `json:"tituloOriginal,omitempty"`

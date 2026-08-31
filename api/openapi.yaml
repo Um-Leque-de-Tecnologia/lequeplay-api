@@ -112,14 +112,17 @@ paths:
   /v1/midias/{id}:
     get:
       summary: Detalhe de uma mídia
-      description: Retorna a mídia com créditos (elenco/equipe) e temporadas (séries).
+      description: >-
+        Retorna a mídia com créditos (elenco/equipe) e temporadas (séries).
+        O parâmetro aceita o id (UUID) ou o slug da mídia.
       tags: [Catálogo]
       security: []
       parameters:
         - name: id
           in: path
           required: true
-          schema: { type: string, format: uuid }
+          description: id (UUID) ou slug da mídia, ex. `homem-aranha-um-novo-dia`.
+          schema: { type: string }
       responses:
         '200':
           description: Detalhe da mídia
@@ -322,6 +325,7 @@ components:
       type: object
       properties:
         id: { type: string, format: uuid }
+        slug: { type: string, description: 'Identificador legível e estável, aceito em /v1/midias/{id}.' }
         tipo: { type: string, enum: [filme, serie, podcast] }
         titulo: { type: string }
         tituloOriginal: { type: string }
@@ -334,7 +338,7 @@ components:
         duracaoMin: { type: integer }
         popularidade: { type: number, format: float }
         notaMedia: { type: number, format: float }
-      required: [id, tipo, titulo, generos, popularidade, notaMedia]
+      required: [id, slug, tipo, titulo, generos, popularidade, notaMedia]
 
     MidiaDetalhe:
       allOf:

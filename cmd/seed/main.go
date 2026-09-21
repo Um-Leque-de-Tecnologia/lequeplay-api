@@ -314,8 +314,9 @@ func upsertTitle(ctx context.Context, tx pgx.Tx, t tmdb.Title, vec []float32, ca
 	var midiaID string
 	err = tx.QueryRow(ctx, `
 INSERT INTO midias (tipo, tmdb_id, slug, titulo, titulo_original, sinopse, ano, generos,
-	poster_path, duracao_min, popularidade, nota_media, embedding, updated_at)
-VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13, now())
+	poster_path, duracao_min, popularidade, nota_media, total_avaliacoes, status,
+	embedding, updated_at)
+VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15, now())
 ON CONFLICT (tipo, tmdb_id) DO UPDATE SET
 	slug = EXCLUDED.slug,
 	titulo = EXCLUDED.titulo,
@@ -327,12 +328,15 @@ ON CONFLICT (tipo, tmdb_id) DO UPDATE SET
 	duracao_min = EXCLUDED.duracao_min,
 	popularidade = EXCLUDED.popularidade,
 	nota_media = EXCLUDED.nota_media,
+	total_avaliacoes = EXCLUDED.total_avaliacoes,
+	status = EXCLUDED.status,
 	embedding = COALESCE(EXCLUDED.embedding, midias.embedding),
 	updated_at = now()
 RETURNING id`,
 		string(t.Tipo), nullInt(t.TMDBID), slug, t.Titulo, nullStr(t.TituloOrig), nullStr(t.Sinopse),
 		nullInt(t.Ano), t.Generos, nullStr(t.PosterPath), nullInt(t.DuracaoMin),
-		t.Popularidade, t.NotaMedia, embedding).Scan(&midiaID)
+		t.Popularidade, t.NotaMedia, t.TotalAvaliacoes, nullStr(t.Status),
+		embedding).Scan(&midiaID)
 	if err != nil {
 		return fmt.Errorf("midia: %w", err)
 	}

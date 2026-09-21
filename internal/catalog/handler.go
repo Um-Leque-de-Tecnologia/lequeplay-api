@@ -46,7 +46,13 @@ func (h *Handler) listGeneros(w http.ResponseWriter, r *http.Request) {
 		apperr.Write(w, r, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, generos)
+	// Envelope com `itens`, como toda listagem desta API: listagem que às vezes
+	// devolve array puro e às vezes envelope é a causa nº 1 de cliente quebrado.
+	//
+	// E nomes, não objetos {id, nome}: o filtro do catálogo é `?genero=Drama`,
+	// então o que o cliente precisa desta lista é exatamente o valor que ele vai
+	// mandar de volta na query. O id do gênero não tem uso publicado.
+	writeJSON(w, http.StatusOK, map[string][]string{"itens": generos})
 }
 
 func (h *Handler) listMidias(w http.ResponseWriter, r *http.Request) {
@@ -104,12 +110,20 @@ func (h *Handler) catalogVersion(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]int64{"versao": v})
 }
 
-// parseFilter extrai tipo/genero/ano/limite/offset dos query params.
+// parseFilter extrai tipo/genero/ano/q e a paginação dos query params.
+//
+// A paginação publicada é `pagina`/`porPagina`: é o par que o contrato com o
+// front descreve e o que a tela precisa para dizer "página 2 de 6". O par
+// `limite`/`offset` continua aceito porque já estava publicado e alguém pode
+// estar usando — quando os dois vêm, `pagina`/`porPagina` vence, por ser o
+// documentado. A conversão para offset acontece aqui, e só aqui: o SQL lá
+// dentro continua pensando em limite e offset.
 func parseFilter(r *http.Request) Filter {
 	q := r.URL.Query()
 	f := Filter{
 		Tipo:   q.Get("tipo"),
 		Genero: q.Get("genero"),
+		Q:      q.Get("q"),
 		Limite: defaultLimit,
 	}
 	if a, err := strconv.Atoi(q.Get("ano")); err == nil {
@@ -123,6 +137,15 @@ func parseFilter(r *http.Request) Filter {
 	}
 	if o, err := strconv.Atoi(q.Get("offset")); err == nil && o > 0 {
 		f.Offset = o
+	}
+	if pp, err := strconv.Atoi(q.Get("porPagina")); err == nil && pp > 0 {
+		if pp > maxLimit {
+			pp = maxLimit
+		}
+		f.Limite = pp
+	}
+	if p, err := strconv.Atoi(q.Get("pagina")); err == nil && p > 1 {
+		f.Offset = (p - 1) * f.Limite
 	}
 	return f
 }

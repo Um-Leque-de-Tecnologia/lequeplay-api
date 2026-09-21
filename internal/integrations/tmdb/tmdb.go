@@ -60,19 +60,26 @@ type Season struct {
 
 // Title é um título do catálogo (filme ou série) já mapeado para o domínio.
 type Title struct {
-	Tipo         Kind
-	TMDBID       int
-	Titulo       string
-	TituloOrig   string
-	Sinopse      string
-	Ano          int
-	Generos      []string
-	PosterPath   string
-	DuracaoMin   int
-	Popularidade float32
-	NotaMedia    float32
-	Creditos     []Person
-	Temporadas   []Season
+	Tipo       Kind
+	TMDBID     int
+	Titulo     string
+	TituloOrig string
+	Sinopse    string
+	Ano        int
+	Generos    []string
+	PosterPath string
+	DuracaoMin int
+	// Popularidade e NotaMedia vêm da TMDB; TotalAvaliacoes é o vote_count, e
+	// os dois últimos andam juntos: a média sem a contagem não diz se alguém
+	// avaliou.
+	Popularidade    float32
+	NotaMedia       float32
+	TotalAvaliacoes int
+	// Status é o texto de produção da TMDB ("Ended", "Returning Series",
+	// "Released"), guardado como vem. Traduzir é decisão de tela.
+	Status     string
+	Creditos   []Person
+	Temporadas []Season
 }
 
 // Client chama a API TMDB v3 usando um token de leitura v4 (Bearer).
@@ -122,6 +129,8 @@ type movieDetail struct {
 	ReleaseDate   string  `json:"release_date"`
 	Runtime       int     `json:"runtime"`
 	VoteAverage   float32 `json:"vote_average"`
+	VoteCount     int     `json:"vote_count"`
+	Status        string  `json:"status"`
 	Popularity    float32 `json:"popularity"`
 	PosterPath    string  `json:"poster_path"`
 	Genres        []genre `json:"genres"`
@@ -136,6 +145,8 @@ type tvDetail struct {
 	FirstAirDate   string  `json:"first_air_date"`
 	EpisodeRunTime []int   `json:"episode_run_time"`
 	VoteAverage    float32 `json:"vote_average"`
+	VoteCount      int     `json:"vote_count"`
+	Status         string  `json:"status"`
 	Popularity     float32 `json:"popularity"`
 	PosterPath     string  `json:"poster_path"`
 	Genres         []genre `json:"genres"`
@@ -396,18 +407,20 @@ func (d movieDetail) toTitle() Title {
 		}
 	}
 	return Title{
-		Tipo:         KindMovie,
-		TMDBID:       d.ID,
-		Titulo:       d.Title,
-		TituloOrig:   d.OriginalTitle,
-		Sinopse:      d.Overview,
-		Ano:          yearOf(d.ReleaseDate),
-		Generos:      genreNames(d.Genres),
-		PosterPath:   d.PosterPath,
-		DuracaoMin:   d.Runtime,
-		Popularidade: d.Popularity,
-		NotaMedia:    d.VoteAverage,
-		Creditos:     people,
+		Tipo:            KindMovie,
+		TMDBID:          d.ID,
+		Titulo:          d.Title,
+		TituloOrig:      d.OriginalTitle,
+		Sinopse:         d.Overview,
+		Ano:             yearOf(d.ReleaseDate),
+		Generos:         genreNames(d.Genres),
+		PosterPath:      d.PosterPath,
+		DuracaoMin:      d.Runtime,
+		Popularidade:    d.Popularity,
+		NotaMedia:       d.VoteAverage,
+		TotalAvaliacoes: d.VoteCount,
+		Status:          d.Status,
+		Creditos:        people,
 	}
 }
 
@@ -442,19 +455,21 @@ func (d tvDetail) toTitle() Title {
 	}
 
 	return Title{
-		Tipo:         KindSeries,
-		TMDBID:       d.ID,
-		Titulo:       d.Name,
-		TituloOrig:   d.OriginalName,
-		Sinopse:      d.Overview,
-		Ano:          yearOf(d.FirstAirDate),
-		Generos:      genreNames(d.Genres),
-		PosterPath:   d.PosterPath,
-		DuracaoMin:   runtime,
-		Popularidade: d.Popularity,
-		NotaMedia:    d.VoteAverage,
-		Creditos:     people,
-		Temporadas:   seasons,
+		Tipo:            KindSeries,
+		TMDBID:          d.ID,
+		Titulo:          d.Name,
+		TituloOrig:      d.OriginalName,
+		Sinopse:         d.Overview,
+		Ano:             yearOf(d.FirstAirDate),
+		Generos:         genreNames(d.Genres),
+		PosterPath:      d.PosterPath,
+		DuracaoMin:      runtime,
+		Popularidade:    d.Popularity,
+		NotaMedia:       d.VoteAverage,
+		TotalAvaliacoes: d.VoteCount,
+		Status:          d.Status,
+		Creditos:        people,
+		Temporadas:      seasons,
 	}
 }
 

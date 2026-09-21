@@ -26,12 +26,12 @@ func NewRepo(pool *pgxpool.Pool) *Repo { return &Repo{pool: pool} }
 // mexer aqui sem mexer lá troca colunas de lugar no Scan, e o erro é mudo.
 const midiaColumns = `id, slug, tipo, titulo, coalesce(titulo_original,''), coalesce(sinopse,''),
 	coalesce(ano,0), generos, coalesce(poster_path,''), coalesce(duracao_min,0),
-	popularidade, nota_media`
+	popularidade, nota_media, total_avaliacoes, coalesce(status,'')`
 
 // midiaColumnsM é a mesma projeção qualificada pelo alias "m" (usada no JOIN da RRF).
 const midiaColumnsM = `m.id, m.slug, m.tipo, m.titulo, coalesce(m.titulo_original,''), coalesce(m.sinopse,''),
 	coalesce(m.ano,0), m.generos, coalesce(m.poster_path,''), coalesce(m.duracao_min,0),
-	m.popularidade, m.nota_media`
+	m.popularidade, m.nota_media, m.total_avaliacoes, coalesce(m.status,'')`
 
 // scanMidia lê uma linha na projeção midiaColumns.
 func scanMidia(row pgx.Row) (Midia, error) {
@@ -40,7 +40,8 @@ func scanMidia(row pgx.Row) (Midia, error) {
 		poster string
 	)
 	if err := row.Scan(&m.ID, &m.Slug, &m.Tipo, &m.Titulo, &m.TituloOriginal, &m.Sinopse,
-		&m.Ano, &m.Generos, &poster, &m.DuracaoMin, &m.Popularidade, &m.NotaMedia); err != nil {
+		&m.Ano, &m.Generos, &poster, &m.DuracaoMin, &m.Popularidade, &m.NotaMedia,
+		&m.TotalAvaliacoes, &m.Status); err != nil {
 		return Midia{}, err
 	}
 	m.PosterURL = posterURL(poster)
@@ -76,6 +77,22 @@ func (r *Repo) ListMidias(ctx context.Context, f Filter) (Page[Midia], error) {
 	var args []any
 	where := filterClause(f, &next, &args)
 
+	// A busca textual simples da listagem mora aqui, e não em filterClause, de
+	// propósito: aquele trecho também monta o WHERE de /v1/busca, onde o `q` já
+	// é a consulta semântica. Um ILIKE por cima restringiria o resultado
+	// vetorial ao que casa por letra — matando justamente a busca que entende
+	// intenção. Aqui ele existe porque a grade do catálogo manda `?q=`, e antes
+	// o parâmetro era ignorado em silêncio: a tela dizia ter filtrado e a
+	// resposta vinha inteira.
+	if f.Q != "" {
+		where += fmt.Sprintf(
+			" AND (titulo ILIKE '%%' || $%d || '%%' OR coalesce(sinopse,'') ILIKE '%%' || $%d || '%%')",
+			next, next,
+		)
+		args = append(args, f.Q)
+		next++
+	}
+
 	countSQL := "SELECT count(*) FROM midias WHERE true" + where
 	var total int
 	if err := r.pool.QueryRow(ctx, countSQL, args...).Scan(&total); err != nil {
@@ -105,7 +122,16 @@ func (r *Repo) ListMidias(ctx context.Context, f Filter) (Page[Midia], error) {
 	if err := rows.Err(); err != nil {
 		return Page[Midia]{}, fmt.Errorf("rows midias: %w", err)
 	}
-	return Page[Midia]{Itens: itens, Total: total, Limite: f.Limite, Offset: f.Offset}, nil
+	// O envelope publica pagina/porPagina; o offset é detalhe do SQL. A divisão
+	// inteira é segura porque o offset só chega aqui como múltiplo do limite
+	// quando veio de `?pagina=`, e quando veio de `?offset=` cru a conta ainda
+	// responde "em que página isto cairia".
+	return Page[Midia]{
+		Itens:     itens,
+		Pagina:    f.Offset/f.Limite + 1,
+		PorPagina: f.Limite,
+		Total:     total,
+	}, nil
 }
 
 // GetMidia retorna uma mídia com créditos e temporadas. O parâmetro aceita tanto
@@ -164,12 +190,25 @@ func (r *Repo) creditos(ctx context.Context, midiaID string) ([]Credito, error) 
 
 	var out []Credito
 	for rows.Next() {
-		var c Credito
-		var foto string
-		if err := rows.Scan(&c.Pessoa, &foto, &c.Papel, &c.Personagem); err != nil {
+		var (
+			c          Credito
+			nome, foto string
+		)
+		if err := rows.Scan(&nome, &foto, &c.Papel, &c.Personagem); err != nil {
 			return nil, fmt.Errorf("scan credito: %w", err)
 		}
-		c.FotoURL = posterURL(foto)
+		// O slug da pessoa é derivado do nome, com o mesmo Slugify do slug de
+		// mídia. A tabela `pessoas` não guarda slug, e derivar aqui evita uma
+		// coluna que precisaria ser mantida em sincronia com o nome.
+		//
+		// No dia em que a pessoa ganhar página própria, o slug vira coluna: um
+		// endereço publicado tem de sobreviver a uma correção de grafia no
+		// nome, e derivar do nome quebraria exatamente aí.
+		c.Pessoa = PessoaResumo{
+			Slug:    Slugify(nome),
+			Nome:    nome,
+			FotoURL: posterURL(foto),
+		}
 		out = append(out, c)
 	}
 	return out, rows.Err()
@@ -195,21 +234,29 @@ func (r *Repo) temporadas(ctx context.Context, midiaID string) ([]Temporada, err
 	return out, rows.Err()
 }
 
-// ListGeneros lista os gêneros do catálogo em ordem alfabética.
-func (r *Repo) ListGeneros(ctx context.Context) ([]Genero, error) {
-	rows, err := r.pool.Query(ctx, "SELECT id, nome FROM generos ORDER BY nome")
+// ListGeneros lista os nomes dos gêneros do catálogo em ordem alfabética.
+//
+// Nomes, e não {id, nome}: o filtro publicado é `?genero=Drama`, então o que o
+// cliente faz com esta lista é devolver o próprio valor na query. O id da
+// tabela não tem uso publicado, e expor identificador que ninguém consome cria
+// contrato para manter sem ninguém ganhar nada.
+func (r *Repo) ListGeneros(ctx context.Context) ([]string, error) {
+	rows, err := r.pool.Query(ctx, "SELECT nome FROM generos ORDER BY nome")
 	if err != nil {
 		return nil, fmt.Errorf("listar generos: %w", err)
 	}
 	defer rows.Close()
 
-	var out []Genero
+	// Slice não-nula desde o começo: um catálogo sem gêneros é `itens: []`.
+	// Com `var out []string`, o JSON sairia `null` e obrigaria todo cliente a
+	// tratar um terceiro estado que não existe no domínio.
+	out := []string{}
 	for rows.Next() {
-		var g Genero
-		if err := rows.Scan(&g.ID, &g.Nome); err != nil {
+		var nome string
+		if err := rows.Scan(&nome); err != nil {
 			return nil, fmt.Errorf("scan genero: %w", err)
 		}
-		out = append(out, g)
+		out = append(out, nome)
 	}
 	return out, rows.Err()
 }
@@ -234,6 +281,7 @@ func scanSearchItems(rows pgx.Rows) ([]SearchItem, error) {
 		)
 		if err := rows.Scan(&it.ID, &it.Slug, &it.Tipo, &it.Titulo, &it.TituloOriginal, &it.Sinopse,
 			&it.Ano, &it.Generos, &poster, &it.DuracaoMin, &it.Popularidade, &it.NotaMedia,
+			&it.TotalAvaliacoes, &it.Status,
 			&it.Score); err != nil {
 			return nil, fmt.Errorf("scan search item: %w", err)
 		}

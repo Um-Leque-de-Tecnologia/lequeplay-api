@@ -246,7 +246,8 @@ func (r *Repo) temporadas(ctx context.Context, midiaID string) ([]Temporada, err
 // de publicação é serializada como YYYY-MM-DD (vazia quando NULL).
 func (r *Repo) podcastEpisodios(ctx context.Context, midiaID string) ([]Episodio, error) {
 	const sql = `SELECT coalesce(numero,0), titulo, coalesce(duracao_min,0), publicado_em
-		FROM podcast_episodios WHERE midia_id = $1 ORDER BY numero`
+		FROM podcast_episodios WHERE midia_id = $1
+		ORDER BY publicado_em DESC NULLS LAST, numero DESC`
 	rows, err := r.pool.Query(ctx, sql, midiaID)
 	if err != nil {
 		return nil, fmt.Errorf("podcast episodios: %w", err)

@@ -3,12 +3,52 @@ package docs
 import (
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/go-chi/chi/v5"
 
 	"github.com/Um-Leque-de-Tecnologia/lequeplay-api/internal/platform/config"
 )
+
+func TestUIRespeitaForwardedPrefix(t *testing.T) {
+	h := mount(config.Docs{Enabled: true})
+
+	// Sem prefixo: aponta para /openapi.yaml. (html/template escapa "/" como "\/"
+	// no contexto JS — o browser interpreta igual.)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/docs", nil))
+	if !strings.Contains(rec.Body.String(), `url: '\/openapi.yaml'`) {
+		t.Errorf("sem prefixo, esperava url: '\\/openapi.yaml'; corpo: %s", rec.Body.String())
+	}
+
+	// Com X-Forwarded-Prefix do gateway: aponta para /play/openapi.yaml.
+	rec = httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/docs", nil)
+	req.Header.Set("X-Forwarded-Prefix", "/play")
+	h.ServeHTTP(rec, req)
+	if !strings.Contains(rec.Body.String(), `url: '\/play\/openapi.yaml'`) {
+		t.Errorf("com prefixo /play, esperava url: '\\/play\\/openapi.yaml'; corpo: %s", rec.Body.String())
+	}
+}
+
+func TestSanitizePrefix(t *testing.T) {
+	cases := map[string]string{
+		"/play":        "/play",
+		"/play/":       "/play",
+		"play":         "/play",
+		"":             "",
+		"  ":           "",
+		"/a/b":         "/a/b",
+		"/x'><script>": "", // injeção → descartada
+		"/com espaço":  "",
+	}
+	for in, want := range cases {
+		if got := sanitizePrefix(in); got != want {
+			t.Errorf("sanitizePrefix(%q) = %q, quer %q", in, got, want)
+		}
+	}
+}
 
 func mount(cfg config.Docs) http.Handler {
 	r := chi.NewRouter()

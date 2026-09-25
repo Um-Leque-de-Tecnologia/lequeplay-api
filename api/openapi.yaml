@@ -23,8 +23,8 @@ info:
     name: Proprietary
 
 servers:
-  - url: https://api.lequeplay.rodolfodebonis.com.br
-    description: Produção
+  - url: https://api.umlequedetecnologia.com.br/play
+    description: Produção (gateway Um Leque de Tecnologia)
   - url: http://localhost:8080
     description: Local
 

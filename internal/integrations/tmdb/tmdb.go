@@ -39,7 +39,7 @@ const (
 	// KindSeries mapeia para o tipo de domínio "serie".
 	KindSeries Kind = "serie"
 	// KindPodcast mapeia para o tipo de domínio "podcast". Não é buscado na TMDB
-	// (que não tem podcasts); é populado por outra integração (ver internal/integrations/podcast),
+	// (que não tem podcasts); é populado pela integração internal/integrations/podcast,
 	// que reusa este tipo de domínio para atravessar o mesmo pipeline de seed.
 	KindPodcast Kind = "podcast"
 )
@@ -83,21 +83,29 @@ type Episode struct {
 // domínio. Frequencia/Episodios só são preenchidos para podcasts; PosterPath
 // para filmes/séries é um path da TMDB (para podcasts, uma URL absoluta de capa).
 type Title struct {
-	Tipo         Kind
-	TMDBID       int
-	Titulo       string
-	TituloOrig   string
-	Sinopse      string
-	Ano          int
-	Generos      []string
-	PosterPath   string
-	DuracaoMin   int
-	Popularidade float32
-	NotaMedia    float32
-	Creditos     []Person
-	Temporadas   []Season
-	Frequencia   string
-	Episodios    []Episode
+	Tipo       Kind
+	TMDBID     int
+	Titulo     string
+	TituloOrig string
+	Sinopse    string
+	Ano        int
+	Generos    []string
+	PosterPath string
+	DuracaoMin int
+	// Popularidade e NotaMedia vêm da TMDB; TotalAvaliacoes é o vote_count, e
+	// os dois últimos andam juntos: a média sem a contagem não diz se alguém
+	// avaliou.
+	Popularidade    float32
+	NotaMedia       float32
+	TotalAvaliacoes int
+	// Status é o texto de produção da TMDB ("Ended", "Returning Series",
+	// "Released"), guardado como vem. Traduzir é decisão de tela.
+	Status     string
+	Creditos   []Person
+	Temporadas []Season
+	// Frequencia e Episodios só valem para podcasts (ingestão via Apple/RSS).
+	Frequencia string
+	Episodios  []Episode
 }
 
 // Client chama a API TMDB v3 usando um token de leitura v4 (Bearer).
@@ -139,6 +147,15 @@ type genre struct {
 	Name string `json:"name"`
 }
 
+type seasonDetail struct {
+	Episodes []struct {
+		EpisodeNumber int    `json:"episode_number"`
+		Name          string `json:"name"`
+		Overview      string `json:"overview"`
+		Runtime       int    `json:"runtime"`
+	} `json:"episodes"`
+}
+
 type movieDetail struct {
 	ID            int     `json:"id"`
 	Title         string  `json:"title"`
@@ -147,6 +164,8 @@ type movieDetail struct {
 	ReleaseDate   string  `json:"release_date"`
 	Runtime       int     `json:"runtime"`
 	VoteAverage   float32 `json:"vote_average"`
+	VoteCount     int     `json:"vote_count"`
+	Status        string  `json:"status"`
 	Popularity    float32 `json:"popularity"`
 	PosterPath    string  `json:"poster_path"`
 	Genres        []genre `json:"genres"`
@@ -161,6 +180,8 @@ type tvDetail struct {
 	FirstAirDate   string  `json:"first_air_date"`
 	EpisodeRunTime []int   `json:"episode_run_time"`
 	VoteAverage    float32 `json:"vote_average"`
+	VoteCount      int     `json:"vote_count"`
+	Status         string  `json:"status"`
 	Popularity     float32 `json:"popularity"`
 	PosterPath     string  `json:"poster_path"`
 	Genres         []genre `json:"genres"`
@@ -176,15 +197,6 @@ type tvDetail struct {
 		AirDate      string `json:"air_date"`
 		EpisodeCount int    `json:"episode_count"`
 	} `json:"seasons"`
-}
-
-type seasonDetail struct {
-	Episodes []struct {
-		EpisodeNumber int    `json:"episode_number"`
-		Name          string `json:"name"`
-		Overview      string `json:"overview"`
-		Runtime       int    `json:"runtime"`
-	} `json:"episodes"`
 }
 
 // FetchPopular busca até `count` títulos populares do `kind` (filme ou série) com
@@ -359,8 +371,8 @@ func (c *Client) fetchOne(ctx context.Context, kind Kind, id int) (Title, error)
 			return Title{}, fmt.Errorf("parse tv %d: %w", id, err)
 		}
 		t := d.toTitle()
-		// Enriquece cada temporada com sua lista de episódios (chamada extra por
-		// temporada). Falhas são best-effort: a temporada fica sem episódios.
+		// Enriquece cada temporada com sua lista de episódios (uma chamada extra
+		// por temporada). Falhas são best-effort: a temporada fica sem episódios.
 		for i := range t.Temporadas {
 			eps, err := c.fetchSeasonEpisodes(ctx, id, t.Temporadas[i].Numero)
 			if err != nil {
@@ -467,18 +479,20 @@ func (d movieDetail) toTitle() Title {
 		}
 	}
 	return Title{
-		Tipo:         KindMovie,
-		TMDBID:       d.ID,
-		Titulo:       d.Title,
-		TituloOrig:   d.OriginalTitle,
-		Sinopse:      d.Overview,
-		Ano:          yearOf(d.ReleaseDate),
-		Generos:      genreNames(d.Genres),
-		PosterPath:   d.PosterPath,
-		DuracaoMin:   d.Runtime,
-		Popularidade: d.Popularity,
-		NotaMedia:    d.VoteAverage,
-		Creditos:     people,
+		Tipo:            KindMovie,
+		TMDBID:          d.ID,
+		Titulo:          d.Title,
+		TituloOrig:      d.OriginalTitle,
+		Sinopse:         d.Overview,
+		Ano:             yearOf(d.ReleaseDate),
+		Generos:         genreNames(d.Genres),
+		PosterPath:      d.PosterPath,
+		DuracaoMin:      d.Runtime,
+		Popularidade:    d.Popularity,
+		NotaMedia:       d.VoteAverage,
+		TotalAvaliacoes: d.VoteCount,
+		Status:          d.Status,
+		Creditos:        people,
 	}
 }
 
@@ -513,19 +527,21 @@ func (d tvDetail) toTitle() Title {
 	}
 
 	return Title{
-		Tipo:         KindSeries,
-		TMDBID:       d.ID,
-		Titulo:       d.Name,
-		TituloOrig:   d.OriginalName,
-		Sinopse:      d.Overview,
-		Ano:          yearOf(d.FirstAirDate),
-		Generos:      genreNames(d.Genres),
-		PosterPath:   d.PosterPath,
-		DuracaoMin:   runtime,
-		Popularidade: d.Popularity,
-		NotaMedia:    d.VoteAverage,
-		Creditos:     people,
-		Temporadas:   seasons,
+		Tipo:            KindSeries,
+		TMDBID:          d.ID,
+		Titulo:          d.Name,
+		TituloOrig:      d.OriginalName,
+		Sinopse:         d.Overview,
+		Ano:             yearOf(d.FirstAirDate),
+		Generos:         genreNames(d.Genres),
+		PosterPath:      d.PosterPath,
+		DuracaoMin:      runtime,
+		Popularidade:    d.Popularity,
+		NotaMedia:       d.VoteAverage,
+		TotalAvaliacoes: d.VoteCount,
+		Status:          d.Status,
+		Creditos:        people,
+		Temporadas:      seasons,
 	}
 }
 

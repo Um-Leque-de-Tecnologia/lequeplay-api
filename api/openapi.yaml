@@ -87,8 +87,17 @@ paths:
           content:
             application/json:
               schema:
-                type: array
-                items: { $ref: '#/components/schemas/Genero' }
+                type: object
+                description: >-
+                  Envelope com `itens`, como toda listagem desta API — listagem
+                  que às vezes devolve array puro e às vezes envelope é a causa
+                  nº 1 de cliente quebrado. Os itens são os nomes: exatamente o
+                  valor que volta em `?genero=`.
+                properties:
+                  itens:
+                    type: array
+                    items: { type: string, example: Drama }
+                required: [itens]
 
   /v1/midias:
     get:
@@ -100,6 +109,9 @@ paths:
         - $ref: '#/components/parameters/Tipo'
         - $ref: '#/components/parameters/Genero'
         - $ref: '#/components/parameters/Ano'
+        - $ref: '#/components/parameters/Q'
+        - $ref: '#/components/parameters/Pagina'
+        - $ref: '#/components/parameters/PorPagina'
         - $ref: '#/components/parameters/Limite'
         - $ref: '#/components/parameters/Offset'
       responses:
@@ -112,17 +124,16 @@ paths:
   /v1/midias/{id}:
     get:
       summary: Detalhe de uma mídia
-      description: |
-        Retorna a mídia com créditos (elenco/equipe) e, conforme o tipo, temporadas
-        (séries) ou episódios + frequência (podcasts). O parâmetro aceita o **UUID**
-        ou o **slug** da mídia.
+      description: >-
+        Retorna a mídia com créditos (elenco/equipe) e temporadas (séries).
+        O parâmetro aceita o id (UUID) ou o slug da mídia.
       tags: [Catálogo]
       security: []
       parameters:
         - name: id
           in: path
           required: true
-          description: UUID ou slug da mídia.
+          description: id (UUID) ou slug da mídia, ex. `homem-aranha-um-novo-dia`.
           schema: { type: string }
       responses:
         '200':
@@ -136,16 +147,16 @@ paths:
   /v1/midias/{id}/temporadas/{numero}/episodios:
     get:
       summary: Episódios de uma temporada
-      description: |
+      description: >-
         Lista os episódios de uma temporada de uma série. A mídia é referenciada
-        pelo **UUID** ou **slug**; a temporada pelo número.
+        pelo id (UUID) ou pelo slug; a temporada, pelo número.
       tags: [Catálogo]
       security: []
       parameters:
         - name: id
           in: path
           required: true
-          description: UUID ou slug da mídia (série).
+          description: id (UUID) ou slug da mídia (série).
           schema: { type: string }
         - name: numero
           in: path
@@ -330,6 +341,26 @@ components:
       in: query
       required: false
       schema: { type: integer, default: 0, minimum: 0 }
+    Pagina:
+      name: pagina
+      in: query
+      required: false
+      description: 'Página, começando em 1. Quando vem junto com offset, este par vence.'
+      schema: { type: integer, default: 1, minimum: 1 }
+    PorPagina:
+      name: porPagina
+      in: query
+      required: false
+      description: 'Itens por página. Teto de 100, como em limite.'
+      schema: { type: integer, default: 20, minimum: 1, maximum: 100 }
+    Q:
+      name: q
+      in: query
+      required: false
+      description: >-
+        Filtro textual simples da listagem: casa com título ou sinopse. Para a
+        busca que entende intenção — vetorial e híbrida — use /v1/busca.
+      schema: { type: string, example: carbono }
 
   responses:
     Validacao:
@@ -358,7 +389,7 @@ components:
       type: object
       properties:
         id: { type: string, format: uuid }
-        slug: { type: string, description: Identificador amigável para URLs. }
+        slug: { type: string, description: 'Identificador legível e estável, aceito em /v1/midias/{id}.' }
         tipo: { type: string, enum: [filme, serie, podcast] }
         titulo: { type: string }
         tituloOriginal: { type: string }
@@ -369,10 +400,27 @@ components:
           items: { type: string }
         posterUrl: { type: string, format: uri }
         duracaoMin: { type: integer }
-        frequencia: { type: string, description: 'Periodicidade do podcast (ex.: Semanal). Apenas para tipo=podcast.' }
         popularidade: { type: number, format: float }
         notaMedia: { type: number, format: float }
-      required: [id, tipo, titulo, generos, popularidade, notaMedia]
+        totalAvaliacoes:
+          type: integer
+          description: >-
+            Quantas pessoas avaliaram. Vem sempre, inclusive como 0 — é ele, e
+            não notaMedia, que responde "este título tem nota?". Sem o contador,
+            um título que ninguém avaliou fica indistinguível de um que todo
+            mundo detestou.
+        status:
+          type: string
+          description: >-
+            Situação de produção, como a TMDB publica: "Returning Series",
+            "Ended", "Canceled" para série; "Released" para filme. Ausente
+            quando a origem não informa.
+          example: Ended
+        frequencia:
+          type: string
+          description: 'Periodicidade do podcast (ex.: Semanal). Apenas para tipo=podcast; ausente nos demais.'
+          example: Semanal
+      required: [id, slug, tipo, titulo, generos, popularidade, notaMedia, totalAvaliacoes]
 
     MidiaDetalhe:
       allOf:
@@ -390,13 +438,24 @@ components:
               description: Episódios do podcast (apenas para tipo=podcast).
               items: { $ref: '#/components/schemas/Episodio' }
 
+    PessoaResumo:
+      type: object
+      description: >-
+        Quem assina um crédito. Objeto, e não o nome solto: nome não é
+        identificador (existem dois "João Silva"), e a tela da pessoa precisa de
+        um endereço estável. O slug segue a mesma regra do slug da mídia.
+      properties:
+        slug: { type: string, example: marina-aleixo }
+        nome: { type: string, example: Marina Aleixo }
+        fotoUrl: { type: string, format: uri }
+      required: [slug, nome]
+
     Credito:
       type: object
       properties:
-        pessoa: { type: string }
-        fotoUrl: { type: string, format: uri }
+        pessoa: { $ref: '#/components/schemas/PessoaResumo' }
         papel: { type: string, enum: [direcao, elenco, apresentacao] }
-        personagem: { type: string }
+        personagem: { type: string, description: 'Só vem preenchido quando papel = elenco.' }
       required: [pessoa, papel]
 
     Temporada:
@@ -428,13 +487,6 @@ components:
         sinopse: { type: string }
       required: [numero]
 
-    Genero:
-      type: object
-      properties:
-        id: { type: integer }
-        nome: { type: string }
-      required: [id, nome]
-
     SearchItem:
       allOf:
         - $ref: '#/components/schemas/Midia'
@@ -456,14 +508,18 @@ components:
 
     PaginaMidias:
       type: object
+      description: >-
+        Envelope de toda listagem. O par publicado é `pagina`/`porPagina` — é o
+        que a tela usa para dizer "página 2 de 6". Na query, `limite`/`offset`
+        continuam aceitos por compatibilidade e são convertidos.
       properties:
         itens:
           type: array
           items: { $ref: '#/components/schemas/Midia' }
-        total: { type: integer }
-        limite: { type: integer }
-        offset: { type: integer }
-      required: [itens, total, limite, offset]
+        pagina: { type: integer, example: 1 }
+        porPagina: { type: integer, example: 20 }
+        total: { type: integer, example: 137 }
+      required: [itens, pagina, porPagina, total]
 
     LoginRequest:
       type: object

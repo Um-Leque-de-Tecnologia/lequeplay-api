@@ -21,8 +21,11 @@ func posterURL(path string) string {
 
 // Midia é um item do catálogo (filme, série ou podcast).
 type Midia struct {
-	ID             string   `json:"id"`
-	Slug           string   `json:"slug,omitempty"`
+	ID string `json:"id"`
+	// Slug é o identificador legível e estável do título, aceito no lugar do id
+	// na rota de detalhe. Sem `omitempty` de propósito: slug vazio é defeito, e
+	// sumir do JSON apenas esconderia o defeito de quem consome.
+	Slug           string   `json:"slug"`
 	Tipo           string   `json:"tipo"`
 	Titulo         string   `json:"titulo"`
 	TituloOriginal string   `json:"tituloOriginal,omitempty"`
@@ -31,19 +34,44 @@ type Midia struct {
 	Generos        []string `json:"generos"`
 	PosterURL      string   `json:"posterUrl,omitempty"`
 	DuracaoMin     int      `json:"duracaoMin,omitempty"`
-	// Frequencia é a periodicidade de um podcast (ex.: "Semanal"). Vazio para
-	// filmes e séries.
-	Frequencia   string  `json:"frequencia,omitempty"`
-	Popularidade float32 `json:"popularidade"`
-	NotaMedia    float32 `json:"notaMedia"`
+	Popularidade   float32  `json:"popularidade"`
+	NotaMedia      float32  `json:"notaMedia"`
+	// TotalAvaliacoes é quantas pessoas avaliaram o título.
+	//
+	// Sem `omitempty`, e é o ponto todo do campo: `notaMedia` sozinha não
+	// distingue "ninguém avaliou" (nota 0 por ausência) de "todo mundo
+	// detestou" (nota 0 de verdade). Quem responde "tem nota?" é o contador, e
+	// um contador que some do JSON quando vale zero devolveria a ambiguidade
+	// que ele existe para desfazer.
+	TotalAvaliacoes int `json:"totalAvaliacoes"`
+	// Status é a situação de produção do título: "Returning Series", "Ended",
+	// "Canceled" para séries, "Released" para filmes. Vem da TMDB como está.
+	//
+	// Com `omitempty` porque nem todo título tem: o catálogo aceita podcast, e
+	// um título semeado à mão pode não trazer nada. Campo ausente é melhor que
+	// string vazia — quem consome checa a existência, não o conteúdo.
+	Status string `json:"status,omitempty"`
+	// Frequencia é a periodicidade de um podcast (ex.: "Semanal"). Com `omitempty`
+	// porque só faz sentido para tipo=podcast; filme e série a omitem.
+	Frequencia string `json:"frequencia,omitempty"`
+}
+
+// PessoaResumo identifica quem assina um crédito.
+//
+// Objeto, e não o nome solto, porque nome não é identificador: existem dois
+// "João Silva", e a tela da pessoa precisa de um endereço estável. O slug sai
+// do mesmo Slugify que gera o slug da mídia.
+type PessoaResumo struct {
+	Slug    string `json:"slug"`
+	Nome    string `json:"nome"`
+	FotoURL string `json:"fotoUrl,omitempty"`
 }
 
 // Credito liga uma pessoa a um título com um papel.
 type Credito struct {
-	Pessoa     string `json:"pessoa"`
-	FotoURL    string `json:"fotoUrl,omitempty"`
-	Papel      string `json:"papel"`
-	Personagem string `json:"personagem,omitempty"`
+	Pessoa     PessoaResumo `json:"pessoa"`
+	Papel      string       `json:"papel"`
+	Personagem string       `json:"personagem,omitempty"`
 }
 
 // Temporada é uma temporada de uma série.
@@ -78,12 +106,6 @@ type MidiaDetalhe struct {
 	Episodios  []Episodio  `json:"episodios,omitempty"`
 }
 
-// Genero é um gênero do catálogo.
-type Genero struct {
-	ID   int    `json:"id"`
-	Nome string `json:"nome"`
-}
-
 // SearchItem é um resultado de busca: a mídia mais o score e a posição no ranking.
 type SearchItem struct {
 	Midia
@@ -92,11 +114,17 @@ type SearchItem struct {
 }
 
 // Page é um envelope de paginação padronizado.
+//
+// Publica `pagina` e `porPagina`, e não `limite`/`offset`: é assim que o
+// contrato com o front está escrito, e é o que a tela precisa para montar
+// "página 2 de 6". Dentro do repositório a conta continua sendo limite e
+// offset, que é o que o SQL entende — a tradução acontece num lugar só, ao
+// montar esta resposta.
 type Page[T any] struct {
-	Itens  []T `json:"itens"`
-	Total  int `json:"total"`
-	Limite int `json:"limite"`
-	Offset int `json:"offset"`
+	Itens     []T `json:"itens"`
+	Pagina    int `json:"pagina"`
+	PorPagina int `json:"porPagina"`
+	Total     int `json:"total"`
 }
 
 // Filter agrega os filtros de listagem/busca do catálogo.
@@ -104,6 +132,10 @@ type Filter struct {
 	Tipo   string
 	Genero string
 	Ano    int
+	// Q é a busca textual simples da listagem — casa com título e sinopse.
+	// Não confundir com /v1/busca, que é a busca de verdade, com vetor e RRF:
+	// este aqui existe porque o catálogo manda `?q=` ao filtrar a grade.
+	Q      string
 	Limite int
 	Offset int
 }

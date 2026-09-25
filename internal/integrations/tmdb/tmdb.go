@@ -38,6 +38,10 @@ const (
 	KindMovie Kind = "filme"
 	// KindSeries mapeia para o tipo de domínio "serie".
 	KindSeries Kind = "serie"
+	// KindPodcast mapeia para o tipo de domínio "podcast". Não é buscado na TMDB
+	// (que não tem podcasts); é populado pela integração internal/integrations/podcast,
+	// que reusa este tipo de domínio para atravessar o mesmo pipeline de seed.
+	KindPodcast Kind = "podcast"
 )
 
 // Person é um crédito (elenco ou equipe) associado a um título.
@@ -56,9 +60,28 @@ type Season struct {
 	Nome           string
 	Ano            int
 	TotalEpisodios int
+	Episodios      []SeasonEpisode
 }
 
-// Title é um título do catálogo (filme ou série) já mapeado para o domínio.
+// SeasonEpisode é um episódio de uma temporada de série.
+type SeasonEpisode struct {
+	Numero     int
+	Nome       string
+	Sinopse    string
+	DuracaoMin int
+}
+
+// Episode é um episódio de podcast (ligado direto à mídia, com data de publicação).
+type Episode struct {
+	Numero      int
+	Titulo      string
+	DuracaoMin  int
+	PublicadoEm time.Time // zero = desconhecida
+}
+
+// Title é um título do catálogo (filme, série ou podcast) já mapeado para o
+// domínio. Frequencia/Episodios só são preenchidos para podcasts; PosterPath
+// para filmes/séries é um path da TMDB (para podcasts, uma URL absoluta de capa).
 type Title struct {
 	Tipo       Kind
 	TMDBID     int
@@ -80,6 +103,9 @@ type Title struct {
 	Status     string
 	Creditos   []Person
 	Temporadas []Season
+	// Frequencia e Episodios só valem para podcasts (ingestão via Apple/RSS).
+	Frequencia string
+	Episodios  []Episode
 }
 
 // Client chama a API TMDB v3 usando um token de leitura v4 (Bearer).
@@ -119,6 +145,15 @@ type credits struct {
 
 type genre struct {
 	Name string `json:"name"`
+}
+
+type seasonDetail struct {
+	Episodes []struct {
+		EpisodeNumber int    `json:"episode_number"`
+		Name          string `json:"name"`
+		Overview      string `json:"overview"`
+		Runtime       int    `json:"runtime"`
+	} `json:"episodes"`
 }
 
 type movieDetail struct {
@@ -335,7 +370,17 @@ func (c *Client) fetchOne(ctx context.Context, kind Kind, id int) (Title, error)
 		if err := json.Unmarshal(body, &d); err != nil {
 			return Title{}, fmt.Errorf("parse tv %d: %w", id, err)
 		}
-		return d.toTitle(), nil
+		t := d.toTitle()
+		// Enriquece cada temporada com sua lista de episódios (uma chamada extra
+		// por temporada). Falhas são best-effort: a temporada fica sem episódios.
+		for i := range t.Temporadas {
+			eps, err := c.fetchSeasonEpisodes(ctx, id, t.Temporadas[i].Numero)
+			if err != nil {
+				continue
+			}
+			t.Temporadas[i].Episodios = eps
+		}
+		return t, nil
 	}
 
 	body, err := c.get(ctx, "/movie/"+strconv.Itoa(id), q)
@@ -347,6 +392,33 @@ func (c *Client) fetchOne(ctx context.Context, kind Kind, id int) (Title, error)
 		return Title{}, fmt.Errorf("parse movie %d: %w", id, err)
 	}
 	return d.toTitle(), nil
+}
+
+// fetchSeasonEpisodes busca os episódios de uma temporada (pt-BR).
+func (c *Client) fetchSeasonEpisodes(ctx context.Context, tvID, seasonNumber int) ([]SeasonEpisode, error) {
+	q := url.Values{}
+	q.Set("language", "pt-BR")
+	body, err := c.get(ctx, fmt.Sprintf("/tv/%d/season/%d", tvID, seasonNumber), q)
+	if err != nil {
+		return nil, fmt.Errorf("season %d/%d: %w", tvID, seasonNumber, err)
+	}
+	var sd seasonDetail
+	if err := json.Unmarshal(body, &sd); err != nil {
+		return nil, fmt.Errorf("parse season %d/%d: %w", tvID, seasonNumber, err)
+	}
+	out := make([]SeasonEpisode, 0, len(sd.Episodes))
+	for _, e := range sd.Episodes {
+		if e.EpisodeNumber <= 0 {
+			continue
+		}
+		out = append(out, SeasonEpisode{
+			Numero:     e.EpisodeNumber,
+			Nome:       e.Name,
+			Sinopse:    e.Overview,
+			DuracaoMin: e.Runtime,
+		})
+	}
+	return out, nil
 }
 
 func genreNames(gs []genre) []string {

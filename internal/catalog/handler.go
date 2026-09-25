@@ -36,6 +36,7 @@ func (h *Handler) Mount(r chi.Router) {
 	// O caminho continua {id} para não quebrar cliente nenhum, mas o parâmetro
 	// aceita o id (UUID) ou o slug da mídia.
 	r.Get("/v1/midias/{id}", h.getMidia)
+	r.Get("/v1/midias/{id}/temporadas/{numero}/episodios", h.getTemporadaEpisodios)
 	r.Get("/v1/busca", h.busca)
 	r.Get("/v1/catalogo/versao", h.catalogVersion)
 }
@@ -74,6 +75,23 @@ func (h *Handler) getMidia(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, midia)
+}
+
+// getTemporadaEpisodios atende GET /v1/midias/{id}/temporadas/{numero}/episodios,
+// onde {id} é o id (UUID) ou o slug da série.
+func (h *Handler) getTemporadaEpisodios(w http.ResponseWriter, r *http.Request) {
+	idOuSlug := chi.URLParam(r, "id")
+	numero, err := strconv.Atoi(chi.URLParam(r, "numero"))
+	if err != nil || numero <= 0 {
+		apperr.Write(w, r, apperr.New(apperr.KindValidation, "Temporada inválida", "número da temporada deve ser um inteiro positivo"))
+		return
+	}
+	episodios, err := h.repo.EpisodiosDaTemporada(r.Context(), idOuSlug, numero)
+	if err != nil {
+		apperr.Write(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, episodios)
 }
 
 func (h *Handler) busca(w http.ResponseWriter, r *http.Request) {

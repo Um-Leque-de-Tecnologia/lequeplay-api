@@ -144,6 +144,38 @@ paths:
         '404':
           $ref: '#/components/responses/NaoEncontrado'
 
+  /v1/midias/{id}/temporadas/{numero}/episodios:
+    get:
+      summary: Episódios de uma temporada
+      description: >-
+        Lista os episódios de uma temporada de uma série. A mídia é referenciada
+        pelo id (UUID) ou pelo slug; a temporada, pelo número.
+      tags: [Catálogo]
+      security: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          description: id (UUID) ou slug da mídia (série).
+          schema: { type: string }
+        - name: numero
+          in: path
+          required: true
+          description: Número da temporada.
+          schema: { type: integer, minimum: 1 }
+      responses:
+        '200':
+          description: Episódios da temporada (lista vazia se ainda não catalogados)
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/EpisodioTemporada' }
+        '400':
+          $ref: '#/components/responses/Validacao'
+        '404':
+          $ref: '#/components/responses/NaoEncontrado'
+
   /v1/busca:
     get:
       summary: Busca no catálogo
@@ -384,6 +416,10 @@ components:
             "Ended", "Canceled" para série; "Released" para filme. Ausente
             quando a origem não informa.
           example: Ended
+        frequencia:
+          type: string
+          description: 'Periodicidade do podcast (ex.: Semanal). Apenas para tipo=podcast; ausente nos demais.'
+          example: Semanal
       required: [id, slug, tipo, titulo, generos, popularidade, notaMedia, totalAvaliacoes]
 
     MidiaDetalhe:
@@ -397,6 +433,10 @@ components:
             temporadas:
               type: array
               items: { $ref: '#/components/schemas/Temporada' }
+            episodios:
+              type: array
+              description: Episódios do podcast (apenas para tipo=podcast).
+              items: { $ref: '#/components/schemas/Episodio' }
 
     PessoaResumo:
       type: object
@@ -426,6 +466,26 @@ components:
         ano: { type: integer }
         totalEpisodios: { type: integer }
       required: [numero, totalEpisodios]
+
+    Episodio:
+      type: object
+      description: Episódio de um podcast.
+      properties:
+        numero: { type: integer, example: 1 }
+        titulo: { type: string, example: O switch com 40 casos }
+        duracaoMin: { type: integer, example: 30 }
+        publicadoEm: { type: string, format: date, example: '2025-02-05' }
+      required: [titulo]
+
+    EpisodioTemporada:
+      type: object
+      description: Episódio de uma temporada de série.
+      properties:
+        numero: { type: integer, example: 1 }
+        titulo: { type: string, example: Piloto }
+        duracaoMin: { type: integer, example: 42 }
+        sinopse: { type: string }
+      required: [numero]
 
     SearchItem:
       allOf:

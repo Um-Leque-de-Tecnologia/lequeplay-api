@@ -7,10 +7,14 @@ import "strings"
 // posterBase é o prefixo do CDN de imagens da TMDB (tamanho w342).
 const posterBase = "https://image.tmdb.org/t/p/w342"
 
-// posterURL monta a URL pública do pôster a partir do path da TMDB.
+// posterURL monta a URL pública do pôster a partir do path da TMDB. Quando o valor
+// já é uma URL absoluta (ex.: capa de podcast vinda da Apple), é devolvido como está.
 func posterURL(path string) string {
 	if path == "" {
 		return ""
+	}
+	if strings.HasPrefix(path, "http://") || strings.HasPrefix(path, "https://") {
+		return path
 	}
 	return posterBase + path
 }
@@ -47,6 +51,9 @@ type Midia struct {
 	// um título semeado à mão pode não trazer nada. Campo ausente é melhor que
 	// string vazia — quem consome checa a existência, não o conteúdo.
 	Status string `json:"status,omitempty"`
+	// Frequencia é a periodicidade de um podcast (ex.: "Semanal"). Com `omitempty`
+	// porque só faz sentido para tipo=podcast; filme e série a omitem.
+	Frequencia string `json:"frequencia,omitempty"`
 }
 
 // PessoaResumo identifica quem assina um crédito.
@@ -75,11 +82,28 @@ type Temporada struct {
 	TotalEpisodios int    `json:"totalEpisodios"`
 }
 
-// MidiaDetalhe é a mídia com seus créditos e temporadas.
+// Episodio é um episódio de podcast, ligado direto à mídia (sem temporada).
+type Episodio struct {
+	Numero      int    `json:"numero,omitempty"`
+	Titulo      string `json:"titulo"`
+	DuracaoMin  int    `json:"duracaoMin,omitempty"`
+	PublicadoEm string `json:"publicadoEm,omitempty"` // ISO YYYY-MM-DD
+}
+
+// EpisodioTemporada é um episódio de uma temporada de série.
+type EpisodioTemporada struct {
+	Numero     int    `json:"numero"`
+	Titulo     string `json:"titulo,omitempty"`
+	DuracaoMin int    `json:"duracaoMin,omitempty"`
+	Sinopse    string `json:"sinopse,omitempty"`
+}
+
+// MidiaDetalhe é a mídia com seus créditos, temporadas (séries) e episódios (podcasts).
 type MidiaDetalhe struct {
 	Midia
 	Creditos   []Credito   `json:"creditos"`
 	Temporadas []Temporada `json:"temporadas,omitempty"`
+	Episodios  []Episodio  `json:"episodios,omitempty"`
 }
 
 // SearchItem é um resultado de busca: a mídia mais o score e a posição no ranking.

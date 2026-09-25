@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -26,12 +27,12 @@ func NewRepo(pool *pgxpool.Pool) *Repo { return &Repo{pool: pool} }
 // mexer aqui sem mexer lá troca colunas de lugar no Scan, e o erro é mudo.
 const midiaColumns = `id, slug, tipo, titulo, coalesce(titulo_original,''), coalesce(sinopse,''),
 	coalesce(ano,0), generos, coalesce(poster_path,''), coalesce(duracao_min,0),
-	popularidade, nota_media, total_avaliacoes, coalesce(status,'')`
+	popularidade, nota_media, total_avaliacoes, coalesce(status,''), coalesce(frequencia,'')`
 
 // midiaColumnsM é a mesma projeção qualificada pelo alias "m" (usada no JOIN da RRF).
 const midiaColumnsM = `m.id, m.slug, m.tipo, m.titulo, coalesce(m.titulo_original,''), coalesce(m.sinopse,''),
 	coalesce(m.ano,0), m.generos, coalesce(m.poster_path,''), coalesce(m.duracao_min,0),
-	m.popularidade, m.nota_media, m.total_avaliacoes, coalesce(m.status,'')`
+	m.popularidade, m.nota_media, m.total_avaliacoes, coalesce(m.status,''), coalesce(m.frequencia,'')`
 
 // scanMidia lê uma linha na projeção midiaColumns.
 func scanMidia(row pgx.Row) (Midia, error) {
@@ -41,7 +42,7 @@ func scanMidia(row pgx.Row) (Midia, error) {
 	)
 	if err := row.Scan(&m.ID, &m.Slug, &m.Tipo, &m.Titulo, &m.TituloOriginal, &m.Sinopse,
 		&m.Ano, &m.Generos, &poster, &m.DuracaoMin, &m.Popularidade, &m.NotaMedia,
-		&m.TotalAvaliacoes, &m.Status); err != nil {
+		&m.TotalAvaliacoes, &m.Status, &m.Frequencia); err != nil {
 		return Midia{}, err
 	}
 	m.PosterURL = posterURL(poster)
@@ -167,12 +168,19 @@ func (r *Repo) GetMidia(ctx context.Context, idOuSlug string) (MidiaDetalhe, err
 	}
 	detalhe.Creditos = creditos
 
-	if m.Tipo == "serie" {
+	switch m.Tipo {
+	case "serie":
 		temporadas, err := r.temporadas(ctx, m.ID)
 		if err != nil {
 			return MidiaDetalhe{}, err
 		}
 		detalhe.Temporadas = temporadas
+	case "podcast":
+		episodios, err := r.podcastEpisodios(ctx, m.ID)
+		if err != nil {
+			return MidiaDetalhe{}, err
+		}
+		detalhe.Episodios = episodios
 	}
 	return detalhe, nil
 }
@@ -234,6 +242,73 @@ func (r *Repo) temporadas(ctx context.Context, midiaID string) ([]Temporada, err
 	return out, rows.Err()
 }
 
+// podcastEpisodios lista os episódios de um podcast, ordenados por número. A data
+// de publicação é serializada como YYYY-MM-DD (vazia quando NULL).
+func (r *Repo) podcastEpisodios(ctx context.Context, midiaID string) ([]Episodio, error) {
+	const sql = `SELECT coalesce(numero,0), titulo, coalesce(duracao_min,0), publicado_em
+		FROM podcast_episodios WHERE midia_id = $1 ORDER BY numero`
+	rows, err := r.pool.Query(ctx, sql, midiaID)
+	if err != nil {
+		return nil, fmt.Errorf("podcast episodios: %w", err)
+	}
+	defer rows.Close()
+
+	var out []Episodio
+	for rows.Next() {
+		var (
+			e   Episodio
+			pub *time.Time
+		)
+		if err := rows.Scan(&e.Numero, &e.Titulo, &e.DuracaoMin, &pub); err != nil {
+			return nil, fmt.Errorf("scan episodio: %w", err)
+		}
+		if pub != nil {
+			e.PublicadoEm = pub.Format("2006-01-02")
+		}
+		out = append(out, e)
+	}
+	return out, rows.Err()
+}
+
+// EpisodiosDaTemporada lista os episódios de uma temporada de uma série. A mídia
+// é referenciada por UUID ou slug e a temporada pelo número. Retorna NotFound
+// quando a mídia ou a temporada não existem.
+func (r *Repo) EpisodiosDaTemporada(ctx context.Context, idOuSlug string, numero int) ([]EpisodioTemporada, error) {
+	column := "slug"
+	if isUUID(idOuSlug) {
+		column = "id"
+	}
+
+	var temporadaID string
+	sql := `SELECT t.id FROM temporadas t
+		JOIN midias m ON m.id = t.midia_id
+		WHERE m.` + column + ` = $1 AND t.numero = $2`
+	if err := r.pool.QueryRow(ctx, sql, idOuSlug, numero).Scan(&temporadaID); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, apperr.New(apperr.KindNotFound, "Temporada não encontrada", "mídia ou temporada inexistente")
+		}
+		return nil, fmt.Errorf("buscar temporada: %w", err)
+	}
+
+	const epSQL = `SELECT numero, coalesce(nome,''), coalesce(sinopse,''), coalesce(duracao_min,0)
+		FROM episodios WHERE temporada_id = $1 ORDER BY numero`
+	rows, err := r.pool.Query(ctx, epSQL, temporadaID)
+	if err != nil {
+		return nil, fmt.Errorf("episodios da temporada: %w", err)
+	}
+	defer rows.Close()
+
+	out := make([]EpisodioTemporada, 0)
+	for rows.Next() {
+		var e EpisodioTemporada
+		if err := rows.Scan(&e.Numero, &e.Titulo, &e.Sinopse, &e.DuracaoMin); err != nil {
+			return nil, fmt.Errorf("scan episodio temporada: %w", err)
+		}
+		out = append(out, e)
+	}
+	return out, rows.Err()
+}
+
 // ListGeneros lista os nomes dos gêneros do catálogo em ordem alfabética.
 //
 // Nomes, e não {id, nome}: o filtro publicado é `?genero=Drama`, então o que o
@@ -281,7 +356,7 @@ func scanSearchItems(rows pgx.Rows) ([]SearchItem, error) {
 		)
 		if err := rows.Scan(&it.ID, &it.Slug, &it.Tipo, &it.Titulo, &it.TituloOriginal, &it.Sinopse,
 			&it.Ano, &it.Generos, &poster, &it.DuracaoMin, &it.Popularidade, &it.NotaMedia,
-			&it.TotalAvaliacoes, &it.Status,
+			&it.TotalAvaliacoes, &it.Status, &it.Frequencia,
 			&it.Score); err != nil {
 			return nil, fmt.Errorf("scan search item: %w", err)
 		}

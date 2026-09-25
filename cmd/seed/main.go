@@ -25,6 +25,7 @@ import (
 	migrations "github.com/Um-Leque-de-Tecnologia/lequeplay-api/db/migrations"
 	"github.com/Um-Leque-de-Tecnologia/lequeplay-api/internal/catalog"
 	"github.com/Um-Leque-de-Tecnologia/lequeplay-api/internal/integrations/gemini"
+	"github.com/Um-Leque-de-Tecnologia/lequeplay-api/internal/integrations/podcast"
 	"github.com/Um-Leque-de-Tecnologia/lequeplay-api/internal/integrations/tmdb"
 	"github.com/Um-Leque-de-Tecnologia/lequeplay-api/internal/platform/config"
 	"github.com/Um-Leque-de-Tecnologia/lequeplay-api/internal/platform/postgres"
@@ -63,6 +64,7 @@ func run() error {
 
 	nMovies := envInt("SEED_MOVIES", 40)
 	nSeries := envInt("SEED_SERIES", 20)
+	nPodcasts := envInt("SEED_PODCASTS", 10)
 
 	tm := tmdb.New(cfg.TMDB.ReadToken)
 	logger.Info("buscando catálogo na TMDB", "filmes", nMovies, "series", nSeries)
@@ -75,8 +77,14 @@ func run() error {
 	if err != nil {
 		return fmt.Errorf("buscar séries: %w", err)
 	}
+
+	// Podcasts vêm da Apple/iTunes (best-effort): uma falha na API externa não
+	// deve abortar o seed de filmes/séries.
+	podcasts := fetchPodcasts(ctx, logger, cfg, nPodcasts)
+
 	titles := append(movies, series...)
-	logger.Info("títulos obtidos", "total", len(titles))
+	titles = append(titles, podcasts...)
+	logger.Info("títulos obtidos", "total", len(titles), "podcasts", len(podcasts))
 
 	// Embeddings via Gemini (RETRIEVAL_DOCUMENT). Sem key, segue sem vetor.
 	gem := gemini.New(cfg.Gemini.APIKey)
@@ -95,6 +103,29 @@ func run() error {
 	}
 	logger.Info("seed concluído", "midias", inserted)
 	return nil
+}
+
+// fetchPodcasts busca podcasts para ingestão: usa a lista curada PODCAST_FEEDS
+// quando definida, senão descobre os mais populares no Brasil via Apple. Erros são
+// logados e ignorados (retorna vazio), pois a fonte é externa e opcional.
+func fetchPodcasts(ctx context.Context, logger *slog.Logger, cfg config.Config, n int) []tmdb.Title {
+	pc := podcast.New()
+	var (
+		podcasts []tmdb.Title
+		err      error
+	)
+	if len(cfg.Podcast.Feeds) > 0 {
+		logger.Info("ingerindo podcasts de PODCAST_FEEDS", "feeds", len(cfg.Podcast.Feeds))
+		podcasts, err = pc.FetchByFeeds(ctx, cfg.Podcast.Feeds)
+	} else {
+		logger.Info("descobrindo podcasts populares (Apple/BR)", "quantidade", n)
+		podcasts, err = pc.FetchPopular(ctx, n)
+	}
+	if err != nil {
+		logger.Warn("ingestão de podcast falhou; seguindo sem podcasts", "erro", err)
+		return nil
+	}
+	return podcasts
 }
 
 // embedTitles preenche `vectors` com o embedding de cada título, em lotes com
@@ -315,8 +346,8 @@ func upsertTitle(ctx context.Context, tx pgx.Tx, t tmdb.Title, vec []float32, ca
 	err = tx.QueryRow(ctx, `
 INSERT INTO midias (tipo, tmdb_id, slug, titulo, titulo_original, sinopse, ano, generos,
 	poster_path, duracao_min, popularidade, nota_media, total_avaliacoes, status,
-	embedding, updated_at)
-VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15, now())
+	frequencia, embedding, updated_at)
+VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16, now())
 ON CONFLICT (tipo, tmdb_id) DO UPDATE SET
 	slug = EXCLUDED.slug,
 	titulo = EXCLUDED.titulo,
@@ -330,13 +361,14 @@ ON CONFLICT (tipo, tmdb_id) DO UPDATE SET
 	nota_media = EXCLUDED.nota_media,
 	total_avaliacoes = EXCLUDED.total_avaliacoes,
 	status = EXCLUDED.status,
+	frequencia = EXCLUDED.frequencia,
 	embedding = COALESCE(EXCLUDED.embedding, midias.embedding),
 	updated_at = now()
 RETURNING id`,
 		string(t.Tipo), nullInt(t.TMDBID), slug, t.Titulo, nullStr(t.TituloOrig), nullStr(t.Sinopse),
 		nullInt(t.Ano), t.Generos, nullStr(t.PosterPath), nullInt(t.DuracaoMin),
 		t.Popularidade, t.NotaMedia, t.TotalAvaliacoes, nullStr(t.Status),
-		embedding).Scan(&midiaID)
+		nullStr(t.Frequencia), embedding).Scan(&midiaID)
 	if err != nil {
 		return fmt.Errorf("midia: %w", err)
 	}
@@ -367,13 +399,42 @@ ON CONFLICT (midia_id, pessoa_id, papel, personagem) DO NOTHING`,
 		return fmt.Errorf("limpar temporadas: %w", err)
 	}
 	for _, s := range t.Temporadas {
-		if _, err := tx.Exec(ctx, `
+		var temporadaID string
+		err := tx.QueryRow(ctx, `
 INSERT INTO temporadas (midia_id, numero, nome, ano, total_episodios)
 VALUES ($1,$2,$3,$4,$5)
 ON CONFLICT (midia_id, numero) DO UPDATE SET
-	nome = EXCLUDED.nome, ano = EXCLUDED.ano, total_episodios = EXCLUDED.total_episodios`,
-			midiaID, s.Numero, nullStr(s.Nome), nullInt(s.Ano), s.TotalEpisodios); err != nil {
+	nome = EXCLUDED.nome, ano = EXCLUDED.ano, total_episodios = EXCLUDED.total_episodios
+RETURNING id`,
+			midiaID, s.Numero, nullStr(s.Nome), nullInt(s.Ano), s.TotalEpisodios).Scan(&temporadaID)
+		if err != nil {
 			return fmt.Errorf("temporada: %w", err)
+		}
+
+		// Episódios da temporada (recriados do zero para manter idempotência).
+		if _, err := tx.Exec(ctx, "DELETE FROM episodios WHERE temporada_id = $1", temporadaID); err != nil {
+			return fmt.Errorf("limpar episodios da temporada: %w", err)
+		}
+		for _, e := range s.Episodios {
+			if _, err := tx.Exec(ctx, `
+INSERT INTO episodios (temporada_id, numero, nome, sinopse, duracao_min)
+VALUES ($1,$2,$3,$4,$5)`,
+				temporadaID, e.Numero, nullStr(e.Nome), nullStr(e.Sinopse), nullInt(e.DuracaoMin)); err != nil {
+				return fmt.Errorf("episodio da temporada: %w", err)
+			}
+		}
+	}
+
+	// Episódios de podcast (recriados do zero para manter idempotência).
+	if _, err := tx.Exec(ctx, "DELETE FROM podcast_episodios WHERE midia_id = $1", midiaID); err != nil {
+		return fmt.Errorf("limpar episodios de podcast: %w", err)
+	}
+	for _, e := range t.Episodios {
+		if _, err := tx.Exec(ctx, `
+INSERT INTO podcast_episodios (midia_id, numero, titulo, duracao_min, publicado_em)
+VALUES ($1,$2,$3,$4,$5)`,
+			midiaID, nullInt(e.Numero), e.Titulo, nullInt(e.DuracaoMin), nullDate(e.PublicadoEm)); err != nil {
+			return fmt.Errorf("episodio de podcast: %w", err)
 		}
 	}
 	return nil
@@ -400,4 +461,11 @@ func nullInt(n int) any {
 		return nil
 	}
 	return n
+}
+
+func nullDate(t time.Time) any {
+	if t.IsZero() {
+		return nil
+	}
+	return t
 }

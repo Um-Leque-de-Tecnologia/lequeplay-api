@@ -20,6 +20,7 @@ type Config struct {
 	Keycloak  Keycloak
 	Gemini    Gemini
 	TMDB      TMDB
+	Podcast   Podcast
 	Search    Search
 	Docs      Docs
 	Telemetry Telemetry
@@ -105,6 +106,12 @@ type Gemini struct {
 // TMDB configura o acesso à API do The Movie Database (usado no seed).
 type TMDB struct {
 	ReadToken string `env:"TMDB_READ_TOKEN" envDefault:""`
+}
+
+// Podcast configura a ingestão de podcasts (usado no seed). Feeds, quando definido,
+// sobrepõe a descoberta automática pela Apple por uma lista curada de URLs de feed RSS.
+type Podcast struct {
+	Feeds []string `env:"PODCAST_FEEDS" envSeparator:","`
 }
 
 // Search configura o comportamento da busca semântica.

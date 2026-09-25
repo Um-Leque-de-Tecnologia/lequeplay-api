@@ -517,7 +517,7 @@ func (c *Client) get(ctx context.Context, u string) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
 		snippet, _ := io.ReadAll(io.LimitReader(resp.Body, 256))
 		return nil, fmt.Errorf("status %d em %s: %s", resp.StatusCode, u, strings.TrimSpace(string(snippet)))

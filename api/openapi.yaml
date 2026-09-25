@@ -112,20 +112,56 @@ paths:
   /v1/midias/{id}:
     get:
       summary: Detalhe de uma mídia
-      description: Retorna a mídia com créditos (elenco/equipe) e temporadas (séries).
+      description: |
+        Retorna a mídia com créditos (elenco/equipe) e, conforme o tipo, temporadas
+        (séries) ou episódios + frequência (podcasts). O parâmetro aceita o **UUID**
+        ou o **slug** da mídia.
       tags: [Catálogo]
       security: []
       parameters:
         - name: id
           in: path
           required: true
-          schema: { type: string, format: uuid }
+          description: UUID ou slug da mídia.
+          schema: { type: string }
       responses:
         '200':
           description: Detalhe da mídia
           content:
             application/json:
               schema: { $ref: '#/components/schemas/MidiaDetalhe' }
+        '404':
+          $ref: '#/components/responses/NaoEncontrado'
+
+  /v1/midias/{id}/temporadas/{numero}/episodios:
+    get:
+      summary: Episódios de uma temporada
+      description: |
+        Lista os episódios de uma temporada de uma série. A mídia é referenciada
+        pelo **UUID** ou **slug**; a temporada pelo número.
+      tags: [Catálogo]
+      security: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          description: UUID ou slug da mídia (série).
+          schema: { type: string }
+        - name: numero
+          in: path
+          required: true
+          description: Número da temporada.
+          schema: { type: integer, minimum: 1 }
+      responses:
+        '200':
+          description: Episódios da temporada (lista vazia se ainda não catalogados)
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/EpisodioTemporada' }
+        '400':
+          $ref: '#/components/responses/Validacao'
         '404':
           $ref: '#/components/responses/NaoEncontrado'
 
@@ -322,6 +358,7 @@ components:
       type: object
       properties:
         id: { type: string, format: uuid }
+        slug: { type: string, description: Identificador amigável para URLs. }
         tipo: { type: string, enum: [filme, serie, podcast] }
         titulo: { type: string }
         tituloOriginal: { type: string }
@@ -332,6 +369,7 @@ components:
           items: { type: string }
         posterUrl: { type: string, format: uri }
         duracaoMin: { type: integer }
+        frequencia: { type: string, description: 'Periodicidade do podcast (ex.: Semanal). Apenas para tipo=podcast.' }
         popularidade: { type: number, format: float }
         notaMedia: { type: number, format: float }
       required: [id, tipo, titulo, generos, popularidade, notaMedia]
@@ -347,6 +385,10 @@ components:
             temporadas:
               type: array
               items: { $ref: '#/components/schemas/Temporada' }
+            episodios:
+              type: array
+              description: Episódios do podcast (apenas para tipo=podcast).
+              items: { $ref: '#/components/schemas/Episodio' }
 
     Credito:
       type: object
@@ -365,6 +407,26 @@ components:
         ano: { type: integer }
         totalEpisodios: { type: integer }
       required: [numero, totalEpisodios]
+
+    Episodio:
+      type: object
+      description: Episódio de um podcast.
+      properties:
+        numero: { type: integer, example: 1 }
+        titulo: { type: string, example: O switch com 40 casos }
+        duracaoMin: { type: integer, example: 30 }
+        publicadoEm: { type: string, format: date, example: '2025-02-05' }
+      required: [titulo]
+
+    EpisodioTemporada:
+      type: object
+      description: Episódio de uma temporada de série.
+      properties:
+        numero: { type: integer, example: 1 }
+        titulo: { type: string, example: Piloto }
+        duracaoMin: { type: integer, example: 42 }
+        sinopse: { type: string }
+      required: [numero]
 
     Genero:
       type: object

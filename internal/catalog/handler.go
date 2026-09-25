@@ -34,6 +34,7 @@ func (h *Handler) Mount(r chi.Router) {
 	r.Get("/v1/generos", h.listGeneros)
 	r.Get("/v1/midias", h.listMidias)
 	r.Get("/v1/midias/{id}", h.getMidia)
+	r.Get("/v1/midias/{id}/temporadas/{numero}/episodios", h.getTemporadaEpisodios)
 	r.Get("/v1/busca", h.busca)
 	r.Get("/v1/catalogo/versao", h.catalogVersion)
 }
@@ -58,13 +59,30 @@ func (h *Handler) listMidias(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) getMidia(w http.ResponseWriter, r *http.Request) {
-	id := chi.URLParam(r, "id")
-	midia, err := h.repo.GetMidia(r.Context(), id)
+	// O path param aceita o UUID ou o slug da mídia.
+	idOrSlug := chi.URLParam(r, "id")
+	midia, err := h.repo.GetMidia(r.Context(), idOrSlug)
 	if err != nil {
 		apperr.Write(w, r, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, midia)
+}
+
+func (h *Handler) getTemporadaEpisodios(w http.ResponseWriter, r *http.Request) {
+	// O path param aceita o UUID ou o slug da mídia.
+	idOrSlug := chi.URLParam(r, "id")
+	numero, err := strconv.Atoi(chi.URLParam(r, "numero"))
+	if err != nil || numero <= 0 {
+		apperr.Write(w, r, apperr.New(apperr.KindValidation, "Temporada inválida", "número da temporada deve ser um inteiro positivo"))
+		return
+	}
+	episodios, err := h.repo.EpisodiosDaTemporada(r.Context(), idOrSlug, numero)
+	if err != nil {
+		apperr.Write(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, episodios)
 }
 
 func (h *Handler) busca(w http.ResponseWriter, r *http.Request) {
